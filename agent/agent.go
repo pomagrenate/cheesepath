@@ -75,14 +75,14 @@ func (a *CrabAgent) RunPath(ctx context.Context, goal string) (<-chan StreamEven
 		}()
 
 		// Build conversation history starting from the system prompt
-		history := []Message{
+		history := []llm.Message{
 			{Role: "system", Content: a.buildSystemPrompt()},
 			{Role: "user", Content: "Goal: " + goal + "\n\nCrawling the path... 🦀 Begin reasoning."},
 		}
 
 		for step := 0; step < a.cfg.MaxSteps; step++ {
 			// ── 1. Call LLM ──────────────────────────────────────────────────
-			raw, err := a.llm.Complete(ctx, LLMRequest{
+			raw, err := a.llm.Complete(ctx, llm.Request{
 				Model:    a.cfg.Model,
 				Messages: history,
 				Grammar:  thoughtGrammar,
@@ -98,7 +98,7 @@ func (a *CrabAgent) RunPath(ctx context.Context, goal string) (<-chan StreamEven
 			thought, toolCalls, err := parseOutput(raw)
 			if err != nil {
 				// Retry hint: just re-ask the model to fix its output
-				history = append(history, Message{
+				history = append(history, llm.Message{
 					Role:    "user",
 					Content: "Your response was not valid JSON. Please respond with valid JSON matching the required schema.",
 				})
@@ -112,7 +112,7 @@ func (a *CrabAgent) RunPath(ctx context.Context, goal string) (<-chan StreamEven
 				path.Answer = thought.FinalAnswer
 				path.Status = PathCompleted
 				events <- StreamEvent{Type: EventFinalAnswer, Step: step, Payload: thought.FinalAnswer}
-				history = append(history, Message{Role: "assistant", Content: raw})
+				history = append(history, llm.Message{Role: "assistant", Content: raw})
 				_ = a.memory.SavePath(path)
 				return
 			}
@@ -155,8 +155,8 @@ func (a *CrabAgent) RunPath(ctx context.Context, goal string) (<-chan StreamEven
 
 			// Feed tool results back into conversation
 			history = append(history,
-				Message{Role: "assistant", Content: raw},
-				Message{Role: "user", Content: "Observation:\n" + obs + "\n\nContinue reasoning toward the goal."},
+				llm.Message{Role: "assistant", Content: raw},
+				llm.Message{Role: "user", Content: "Observation:\n" + obs + "\n\nContinue reasoning toward the goal."},
 			)
 		}
 

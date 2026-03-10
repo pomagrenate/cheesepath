@@ -71,7 +71,8 @@ func DefaultRegistry(cheesecrabAddr string) *Registry {
 	r.Register(NewListDirTool())
 	r.Register(NewShellTool())
 	r.Register(NewSysInfoTool())
-	r.Register(NewModelsTool(cheesecrabAddr))
+	r.Register(NewListModelsTool(cheesecrabAddr))
+	r.Register(NewSwitchModelTool(cheesecrabAddr))
 	r.Register(NewApplyDiffTool())
 	r.Register(NewGitTool())
 	return r

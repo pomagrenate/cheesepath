@@ -54,29 +54,9 @@ type CrabToolCall struct {
 	Error     string            `json:"error,omitempty"`
 }
 
-// LLMRequest is the payload sent to cheese-server for each agent step.
-type LLMRequest struct {
-	Model    string    `json:"model"`
-	Messages []Message `json:"messages"`
-	// Grammar enforces JSON structured output on the model level
-	Grammar  string `json:"grammar,omitempty"`
-	Stream   bool   `json:"stream"`
-}
+// LLMRequest is kept as a type alias for llm.Request to avoid import cycles.
+// The actual struct is defined in the llm package.
 
-// Message is an OpenAI-compatible chat message.
-type Message struct {
-	Role    string `json:"role"` // "system" | "user" | "assistant"
-	Content string `json:"content"`
-}
-
-// LLMResponse is the minimal response struct we care about from cheese-server.
-type LLMResponse struct {
-	Choices []struct {
-		Message struct {
-			Content string `json:"content"`
-		} `json:"message"`
-	} `json:"choices"`
-}
 
 // ─── Stream events ────────────────────────────────────────────────────────────
 
