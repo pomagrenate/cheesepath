@@ -64,12 +64,14 @@ type CrabToolCall struct {
 type StreamEventType string
 
 const (
-	EventThought     StreamEventType = "thought"
-	EventToolCall    StreamEventType = "tool_call"
-	EventObservation StreamEventType = "observation"
-	EventFinalAnswer StreamEventType = "final_answer"
-	EventError       StreamEventType = "error"
-	EventApprovalReq StreamEventType = "approval_required"
+	EventThought      StreamEventType = "thought"
+	EventToolCall     StreamEventType = "tool_call"
+	EventObservation  StreamEventType = "observation"
+	EventFinalAnswer  StreamEventType = "final_answer"
+	EventError        StreamEventType = "error"
+	EventApprovalReq  StreamEventType = "approval_required"
+	EventThinking     StreamEventType = "thinking"      // model started generating
+	EventStreamToken  StreamEventType = "stream_token"  // one real-time token chunk
 )
 
 // StreamEvent is one SSE-style event emitted during a CrabPath run.

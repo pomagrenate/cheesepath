@@ -81,15 +81,49 @@ func (a *CrabAgent) RunPath(ctx context.Context, goal string) (<-chan StreamEven
 		}
 
 		for step := 0; step < a.cfg.MaxSteps; step++ {
-			// ── 1. Call LLM ──────────────────────────────────────────────────
-			raw, err := a.llm.Complete(ctx, llm.Request{
+			// ── 1. Call LLM (streaming so UI shows tokens in real time) ────────
+			events <- StreamEvent{Type: EventThinking, Step: step, Payload: ""}
+
+			tokenCh, fullCh, errCh := a.llm.CompleteStream(ctx, llm.Request{
 				Model:    a.cfg.Model,
 				Messages: history,
-				Grammar:  thoughtGrammar,
-				Stream:   false,
+				// NOTE: stream:true — grammar is NOT sent here (llama.cpp does not
+				// support grammar + streaming simultaneously in many builds).
+				// We stream freely, get full text, then re-parse.
 			})
-			if err != nil {
-				events <- StreamEvent{Type: EventError, Step: step, Payload: err.Error()}
+
+			var raw string
+			for {
+				select {
+				case tok, ok := <-tokenCh:
+					if !ok {
+						tokenCh = nil
+					} else if tok != "" {
+						events <- StreamEvent{Type: EventStreamToken, Step: step, Payload: tok}
+					}
+				case full, ok := <-fullCh:
+					if ok {
+						raw = full
+					}
+					fullCh = nil
+				case err, ok := <-errCh:
+					if ok && err != nil {
+						events <- StreamEvent{Type: EventError, Step: step, Payload: err.Error()}
+						path.Status = PathFailed
+						return
+					}
+					errCh = nil
+				case <-ctx.Done():
+					events <- StreamEvent{Type: EventError, Step: step, Payload: "context cancelled"}
+					path.Status = PathFailed
+					return
+				}
+				if tokenCh == nil && fullCh == nil && errCh == nil {
+					break
+				}
+			}
+			if raw == "" {
+				events <- StreamEvent{Type: EventError, Step: step, Payload: "empty response from model"}
 				path.Status = PathFailed
 				return
 			}
