@@ -34,10 +34,13 @@ func NewClient(baseURL string) *Client {
 // ─── Types ───────────────────────────────────────────────────────────────────
 
 type Request struct {
-	Model    string    `json:"model"`
-	Messages []Message `json:"messages"`
-	Grammar  string    `json:"grammar,omitempty"`
-	Stream   bool      `json:"stream"`
+	Model         string    `json:"model"`
+	Messages      []Message `json:"messages"`
+	Grammar       string    `json:"grammar,omitempty"`
+	Stream        bool      `json:"stream"`
+	Temperature   float32   `json:"temperature,omitempty"`
+	TopP          float32   `json:"top_p,omitempty"`
+	RepeatPenalty float32   `json:"repetition_penalty,omitempty"`
 }
 
 type Message struct {

@@ -85,11 +85,10 @@ func (a *CrabAgent) RunPath(ctx context.Context, goal string) (<-chan StreamEven
 			events <- StreamEvent{Type: EventThinking, Step: step, Payload: ""}
 
 			tokenCh, fullCh, errCh := a.llm.CompleteStream(ctx, llm.Request{
-				Model:    a.cfg.Model,
-				Messages: history,
-				// NOTE: stream:true — grammar is NOT sent here (llama.cpp does not
-				// support grammar + streaming simultaneously in many builds).
-				// We stream freely, get full text, then re-parse.
+				Model:         a.cfg.Model,
+				Messages:      history,
+				Temperature:   0.1, // Low temperature for stability
+				RepeatPenalty: 1.1, // Prevent loops (schema schema schema...)
 			})
 
 			var raw string
@@ -134,7 +133,7 @@ func (a *CrabAgent) RunPath(ctx context.Context, goal string) (<-chan StreamEven
 				// Retry hint: just re-ask the model to fix its output
 				history = append(history, llm.Message{
 					Role:    "user",
-					Content: "Your response was not valid JSON. Please respond with valid JSON matching the required schema.",
+					Content: "Your response was not valid. Please provide a single JSON block exactly as requested.",
 				})
 				continue
 			}
@@ -208,7 +207,7 @@ func (a *CrabAgent) buildSystemPrompt() string {
 	var sb strings.Builder
 	sb.WriteString(`You are CrabAgent, a powerful local AI agent running inside Cheesecrab Super.
 You execute goals autonomously on the user's machine using available tools.
-You MUST respond with valid JSON exactly matching this schema:
+You MUST respond with valid JSON exactly matching this format:
 
 {
   "reasoning": "<your chain-of-thought>",
@@ -228,6 +227,21 @@ OR if you have the final answer:
   "tool_calls": []
 }
 
+EXAMPLE:
+User: Goal: Create a folder named 'test'
+Assistant: {
+  "reasoning": "I need to use the 'os_mkdir' tool to create the directory.",
+  "is_final": false,
+  "tool_calls": [{"tool": "os_mkdir", "args": {"path": "test"}}]
+}
+User: Observation: [os_mkdir]: success
+Assistant: {
+  "reasoning": "The folder has been created successfully.",
+  "is_final": true,
+  "final_answer": "I have created the 'test' folder as requested.",
+  "tool_calls": []
+}
+
 Available tools:
 `)
 	for _, t := range a.registry.All() {
@@ -239,14 +253,14 @@ Available tools:
 
 // parseOutput extracts a CrabThought and any tool calls from a raw LLM string.
 func parseOutput(raw string) (CrabThought, []CrabToolCall, error) {
-	// Extract JSON — strip any markdown fences if present
-	raw = strings.TrimSpace(raw)
-	if strings.HasPrefix(raw, "```") {
-		lines := strings.Split(raw, "\n")
-		if len(lines) > 2 {
-			raw = strings.Join(lines[1:len(lines)-1], "\n")
-		}
+	// 1. Find the first '{' and last '}' to extract the JSON object.
+	// This helps when small models add conversational filler before or after the JSON.
+	startIndex := strings.Index(raw, "{")
+	lastIndex := strings.LastIndex(raw, "}")
+	if startIndex == -1 || lastIndex == -1 || lastIndex <= startIndex {
+		return CrabThought{}, nil, fmt.Errorf("no valid JSON object found in response")
 	}
+	jsonStr := raw[startIndex : lastIndex+1]
 
 	var parsed struct {
 		Reasoning   string         `json:"reasoning"`
@@ -256,8 +270,8 @@ func parseOutput(raw string) (CrabThought, []CrabToolCall, error) {
 		ToolCalls   []CrabToolCall `json:"tool_calls"`
 	}
 
-	if err := json.Unmarshal([]byte(raw), &parsed); err != nil {
-		return CrabThought{}, nil, fmt.Errorf("parse error: %w", err)
+	if err := json.Unmarshal([]byte(jsonStr), &parsed); err != nil {
+		return CrabThought{}, nil, fmt.Errorf("parse error: %w (raw content: %s)", err, jsonStr)
 	}
 
 	thought := CrabThought{
