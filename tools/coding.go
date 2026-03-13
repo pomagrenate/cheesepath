@@ -9,8 +9,6 @@ import (
 )
 
 // ─── apply_code_diff ──────────────────────────────────────────────────────────
-// Applies a unified diff (patch) to a file in the workspace.
-// The agent generates the diff; this tool writes it as a temp .patch and applies it.
 
 type ApplyDiffTool struct{}
 
@@ -37,8 +35,6 @@ func (t *ApplyDiffTool) Execute(ctx context.Context, args map[string]any) (strin
 	if targetFile == "" || diff == "" {
 		return "", fmt.Errorf("apply_code_diff: 'target_file' and 'diff' required")
 	}
-
-	// Write diff to temp file
 	tmp, err := os.CreateTemp("", "crabpatch-*.patch")
 	if err != nil {
 		return "", err
@@ -83,12 +79,10 @@ func (t *GitTool) Execute(ctx context.Context, args map[string]any) (string, err
 	if repoPath == "" || message == "" {
 		return "", fmt.Errorf("git_commit: 'repo_path' and 'message' required")
 	}
-
 	addOut, err := exec.CommandContext(ctx, "git", "-C", repoPath, "add", "-A").CombinedOutput()
 	if err != nil {
 		return string(addOut), fmt.Errorf("git add failed: %w", err)
 	}
-
 	commitOut, err := exec.CommandContext(ctx, "git", "-C", repoPath, "commit", "-m", message).CombinedOutput()
 	if err != nil {
 		return string(commitOut), fmt.Errorf("git commit failed: %w", err)

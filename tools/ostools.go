@@ -1,5 +1,3 @@
-// Package tools — rich OS-aware file system tools for crabpath.
-// Designed to give the agent the same file awareness as Antigravity/Cursor.
 package tools
 
 import (
@@ -85,49 +83,42 @@ func (t *ListDirRecursiveTool) Execute(_ context.Context, args map[string]any) (
 	}
 
 	var lines []string
-	rootDepth := strings.Count(filepath.Clean(root), string(os.PathSeparator))
-
 	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
-			return nil // skip unreadable
+			return nil
 		}
 		rel, _ := filepath.Rel(root, path)
 		if rel == "." {
 			return nil
 		}
 		depth := strings.Count(rel, string(os.PathSeparator))
-		_ = rootDepth
-
 		if d.IsDir() && skipDirs[d.Name()] {
 			return filepath.SkipDir
 		}
 		if depth >= maxDepth && d.IsDir() {
 			return filepath.SkipDir
 		}
-
 		prefix := strings.Repeat("  ", depth)
 		if d.IsDir() {
-			lines = append(lines, prefix+"📁 "+rel+"/")
+			lines = append(lines, prefix+"[dir] "+rel+"/")
 		} else {
-			lines = append(lines, prefix+"📄 "+rel)
+			lines = append(lines, prefix+"[file] "+rel)
 		}
 		return nil
 	})
 	if err != nil {
 		return "", err
 	}
-
 	if len(lines) == 0 {
 		return "(empty directory)", nil
 	}
-	// Cap output to avoid flooding context window
 	if len(lines) > 300 {
-		lines = append(lines[:300], fmt.Sprintf("... (%d more items, use max_depth to limit)", len(lines)-300))
+		lines = append(lines[:300], fmt.Sprintf("... (%d more items)", len(lines)-300))
 	}
 	return strings.Join(lines, "\n"), nil
 }
 
-// ─── search_files (content grep) ─────────────────────────────────────────────
+// ─── search_files ─────────────────────────────────────────────────────────────
 
 type SearchFilesTool struct{}
 
@@ -142,8 +133,8 @@ func (t *SearchFilesTool) Schema() map[string]any {
 	return map[string]any{
 		"type": "object",
 		"properties": map[string]any{
-			"path":    map[string]any{"type": "string", "description": "Directory to search in"},
-			"pattern": map[string]any{"type": "string", "description": "Text to search for (case-insensitive)"},
+			"path":    map[string]any{"type": "string"},
+			"pattern": map[string]any{"type": "string"},
 			"ext":     map[string]any{"type": "string", "description": "Optional file extension filter, e.g. '.go'"},
 		},
 		"required": []string{"path", "pattern"},
@@ -157,7 +148,6 @@ func (t *SearchFilesTool) Execute(_ context.Context, args map[string]any) (strin
 		return "", fmt.Errorf("search_files: 'path' and 'pattern' required")
 	}
 	patternLower := strings.ToLower(pattern)
-
 	var results []string
 	_ = filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil || d.IsDir() {
@@ -173,8 +163,7 @@ func (t *SearchFilesTool) Execute(_ context.Context, args map[string]any) (strin
 		if err != nil {
 			return nil
 		}
-		lines := strings.Split(string(data), "\n")
-		for i, line := range lines {
+		for i, line := range strings.Split(string(data), "\n") {
 			if strings.Contains(strings.ToLower(line), patternLower) {
 				rel, _ := filepath.Rel(root, path)
 				results = append(results, fmt.Sprintf("%s:%d: %s", rel, i+1, strings.TrimSpace(line)))
@@ -185,14 +174,13 @@ func (t *SearchFilesTool) Execute(_ context.Context, args map[string]any) (strin
 		}
 		return nil
 	})
-
 	if len(results) == 0 {
 		return fmt.Sprintf("No matches found for '%s' in %s", pattern, root), nil
 	}
 	return strings.Join(results, "\n"), nil
 }
 
-// ─── find_files (name pattern) ────────────────────────────────────────────────
+// ─── find_files ───────────────────────────────────────────────────────────────
 
 type FindFilesTool struct{}
 
@@ -208,7 +196,7 @@ func (t *FindFilesTool) Schema() map[string]any {
 		"type": "object",
 		"properties": map[string]any{
 			"path":    map[string]any{"type": "string"},
-			"pattern": map[string]any{"type": "string", "description": "Glob pattern for filename, e.g. '*.go'"},
+			"pattern": map[string]any{"type": "string", "description": "Glob pattern for filename"},
 		},
 		"required": []string{"path", "pattern"},
 	}
@@ -219,7 +207,6 @@ func (t *FindFilesTool) Execute(_ context.Context, args map[string]any) (string,
 	if root == "" || pattern == "" {
 		return "", fmt.Errorf("find_files: 'path' and 'pattern' required")
 	}
-
 	var matches []string
 	_ = filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
@@ -229,15 +216,13 @@ func (t *FindFilesTool) Execute(_ context.Context, args map[string]any) (string,
 			return filepath.SkipDir
 		}
 		if !d.IsDir() {
-			matched, _ := filepath.Match(pattern, d.Name())
-			if matched {
+			if matched, _ := filepath.Match(pattern, d.Name()); matched {
 				rel, _ := filepath.Rel(root, path)
 				matches = append(matches, rel)
 			}
 		}
 		return nil
 	})
-
 	if len(matches) == 0 {
 		return fmt.Sprintf("No files found matching '%s' in %s", pattern, root), nil
 	}
@@ -277,7 +262,6 @@ func (t *CreateDirTool) Execute(_ context.Context, args map[string]any) (string,
 }
 
 // ─── delete_file ──────────────────────────────────────────────────────────────
-// DANGEROUS: requires user approval.
 
 type DeleteFileTool struct{}
 
@@ -305,7 +289,7 @@ func (t *DeleteFileTool) Execute(_ context.Context, args map[string]any) (string
 		return "", err
 	}
 	if info.IsDir() {
-		return "", fmt.Errorf("delete_file: path is a directory, use a shell command to remove directories")
+		return "", fmt.Errorf("delete_file: path is a directory")
 	}
 	if err := os.Remove(path); err != nil {
 		return "", err

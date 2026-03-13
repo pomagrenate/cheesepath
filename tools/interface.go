@@ -1,59 +1,38 @@
 // Package tools defines the CrabTool interface and the tool registry.
-// Every built-in or user-supplied tool must implement this interface.
 package tools
 
 import "context"
 
-// ─── CrabTool Interface ───────────────────────────────────────────────────────
-
-// CrabTool is the single interface you implement to add any capability to the agent.
-// All built-in tools (fs, shell, models, coding) implement this.
+// CrabTool is the single interface every tool must implement.
 type CrabTool interface {
-	// Name returns the snake_case identifier that the model uses in tool_calls.
 	Name() string
-
-	// Description is sent to the LLM in the system prompt to explain what the tool does.
 	Description() string
-
-	// Schema returns a JSON Schema object describing the expected args.
-	// This is embedded in the grammar so the model outputs valid JSON.
 	Schema() map[string]any
-
-	// Dangerous returns true if this tool should pause for user approval.
-	// E.g. shell execution, file deletion, git push.
 	Dangerous() bool
-
-	// Execute runs the tool with the provided args and returns a human-readable result.
 	Execute(ctx context.Context, args map[string]any) (string, error)
 }
-
-// ─── Registry ────────────────────────────────────────────────────────────────
 
 // Registry holds all registered CrabTools by name.
 type Registry struct {
 	tools map[string]CrabTool
 }
 
-// NewRegistry creates a new empty Registry.
 func NewRegistry() *Registry {
 	return &Registry{tools: make(map[string]CrabTool)}
 }
 
-// Register adds a tool. Panics on duplicate name (fail fast at startup).
 func (r *Registry) Register(t CrabTool) {
 	if _, ok := r.tools[t.Name()]; ok {
-		panic("crabpath: duplicate tool name: " + t.Name())
+		panic("crabchain: duplicate tool name: " + t.Name())
 	}
 	r.tools[t.Name()] = t
 }
 
-// Get retrieves a tool by name.
 func (r *Registry) Get(name string) (CrabTool, bool) {
 	t, ok := r.tools[name]
 	return t, ok
 }
 
-// All returns all tools as a slice (for listing in the system prompt / API).
 func (r *Registry) All() []CrabTool {
 	out := make([]CrabTool, 0, len(r.tools))
 	for _, t := range r.tools {
@@ -62,27 +41,24 @@ func (r *Registry) All() []CrabTool {
 	return out
 }
 
+// DefaultRegistry returns a registry pre-loaded with all built-in tools.
 func DefaultRegistry(cheesecrabAddr string) *Registry {
 	r := NewRegistry()
-	// Core file ops
 	r.Register(NewReadFileTool())
 	r.Register(NewWriteFileTool())
 	r.Register(NewListDirTool())
-	// Rich OS / filesystem tools (Antigravity-style)
 	r.Register(NewGetFileInfoTool())
 	r.Register(NewListDirRecursiveTool())
 	r.Register(NewSearchFilesTool())
 	r.Register(NewFindFilesTool())
 	r.Register(NewCreateDirTool())
 	r.Register(NewDeleteFileTool())
-	// Shell & system
 	r.Register(NewShellTool())
 	r.Register(NewSysInfoTool())
-	// Model management
 	r.Register(NewListModelsTool(cheesecrabAddr))
 	r.Register(NewSwitchModelTool(cheesecrabAddr))
-	// Coding
 	r.Register(NewApplyDiffTool())
 	r.Register(NewGitTool())
+	r.Register(NewHTTPRequestTool())
 	return r
 }

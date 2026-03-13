@@ -38,7 +38,6 @@ func (t *ReadFileTool) Execute(_ context.Context, args map[string]any) (string, 
 		return "", fmt.Errorf("read_file: %w", err)
 	}
 	content := string(data)
-	// Truncate very large files to avoid flooding the context window
 	const maxBytes = 8000
 	if len(content) > maxBytes {
 		content = content[:maxBytes] + "\n... [truncated]"

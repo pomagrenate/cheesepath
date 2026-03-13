@@ -10,13 +10,6 @@ import (
 )
 
 // ─── safe_exec_shell ──────────────────────────────────────────────────────────
-// DANGEROUS: requires user approval in the Electron UI before executing.
-
-// allowedCommands is an allowlist of command prefixes the agent may run
-// without user approval. Anything else still requires Dangerous()=true approval.
-var allowedCommands = []string{
-	"ls", "cat", "echo", "pwd", "which", "git log", "git status", "go ", "python3 -c",
-}
 
 type ShellTool struct{}
 
@@ -39,23 +32,17 @@ func (t *ShellTool) Execute(ctx context.Context, args map[string]any) (string, e
 	if cmd == "" {
 		return "", fmt.Errorf("safe_exec_shell: 'command' required")
 	}
-
-	// Hard block on obviously dangerous patterns
 	for _, blocked := range []string{"rm -rf /", "mkfs", "dd if=", ":(){:|:&};:"} {
 		if strings.Contains(cmd, blocked) {
 			return "", fmt.Errorf("safe_exec_shell: blocked dangerous pattern: %s", blocked)
 		}
 	}
-
-	var shell string
-	var flag string
+	var shell, flag string
 	if runtime.GOOS == "windows" {
 		shell, flag = "cmd", "/C"
 	} else {
 		shell, flag = "sh", "-c"
 	}
-
-	// Time-bounded execution
 	execCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 

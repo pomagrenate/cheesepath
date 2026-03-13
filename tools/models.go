@@ -7,7 +7,6 @@ import (
 	"net/http"
 )
 
-// modelClient provides a shared HTTP client for model management tools.
 type modelClient struct {
 	serverAddr string
 	httpClient *http.Client
@@ -39,11 +38,9 @@ func NewListModelsTool(serverAddr string) *ListModelsTool {
 	return &ListModelsTool{newModelClient(serverAddr)}
 }
 
-func (t *ListModelsTool) Name() string      { return "list_models" }
-func (t *ListModelsTool) Dangerous() bool   { return false }
-func (t *ListModelsTool) Description() string {
-	return "Lists all locally available GGUF models."
-}
+func (t *ListModelsTool) Name()        string { return "list_models" }
+func (t *ListModelsTool) Dangerous()   bool   { return false }
+func (t *ListModelsTool) Description() string { return "Lists all locally available GGUF models." }
 func (t *ListModelsTool) Schema() map[string]any {
 	return map[string]any{"type": "object", "properties": map[string]any{}}
 }
@@ -59,8 +56,8 @@ func NewSwitchModelTool(serverAddr string) *SwitchModelTool {
 	return &SwitchModelTool{newModelClient(serverAddr)}
 }
 
-func (t *SwitchModelTool) Name() string    { return "switch_model" }
-func (t *SwitchModelTool) Dangerous() bool { return false }
+func (t *SwitchModelTool) Name()      string { return "switch_model" }
+func (t *SwitchModelTool) Dangerous() bool   { return false }
 func (t *SwitchModelTool) Description() string {
 	return "Switches the active inference model by filename."
 }
@@ -78,7 +75,3 @@ func (t *SwitchModelTool) Execute(_ context.Context, args map[string]any) (strin
 	}
 	return fmt.Sprintf("switched active model to %s (restart may be needed)", filename), nil
 }
-
-// NewModelsTool returns a *modelClient base — do not use directly.
-// Use NewListModelsTool / NewSwitchModelTool instead.
-func NewModelsTool(serverAddr string) *modelClient { return newModelClient(serverAddr) }
