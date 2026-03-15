@@ -63,6 +63,7 @@ const (
 	EventApprovalReq StreamEventType = "approval_required"
 	EventThinking    StreamEventType = "thinking"
 	EventStreamToken StreamEventType = "stream_token"
+	EventCrabTableReq StreamEventType = "crabtable_req"
 )
 
 // StreamEvent is one SSE-style event emitted during a CrabPath run.

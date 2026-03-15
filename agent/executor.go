@@ -192,6 +192,10 @@ func (e *Executor) Run(ctx context.Context, goal string) (<-chan StreamEvent, *C
 					events <- StreamEvent{Type: EventApprovalReq, Step: step, Payload: tc}
 				}
 
+				if tc.ToolName == "crabtable" {
+					events <- StreamEvent{Type: EventCrabTableReq, Step: step, Payload: tc}
+				}
+
 				result, execErr := tool.Execute(ctx, tc.Args)
 				if execErr != nil {
 					crabStep.ToolCalls[i].Error = execErr.Error()

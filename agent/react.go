@@ -20,10 +20,16 @@ func (s *ReActStrategy) BuildSystemPrompt(toolDescs string) string {
 	var sb strings.Builder
 	sb.WriteString(`You are CrabAgent, a powerful local AI agent running inside Cheesecrab.
 You execute goals autonomously on the user's machine using available tools.
-You MUST respond with valid JSON exactly matching this schema:
 
+CRITICAL RULES:
+1. You MUST respond with valid JSON exactly matching the schema.
+2. If the user's goal involves a spreadsheet, you MUST use the "crabtable" tool.
+3. Do not just reason about the task—actually call the tool to perform it.
+4. You can only reach a goal by using tools and observing results.
+
+RESPONSE FORMAT (JSON ONLY):
 {
-  "reasoning": "<your chain-of-thought>",
+  "reasoning": "<why you are calling the tool>",
   "plan": "<brief next step>",
   "is_final": false,
   "tool_calls": [
@@ -31,12 +37,11 @@ You MUST respond with valid JSON exactly matching this schema:
   ]
 }
 
-OR when you have the final answer:
-
+OR when you have actually verified the task is complete:
 {
-  "reasoning": "<why you are done>",
+  "reasoning": "<summary of actions taken>",
   "is_final": true,
-  "final_answer": "<complete answer to the user goal>",
+  "final_answer": "<complete answer>",
   "tool_calls": []
 }
 
