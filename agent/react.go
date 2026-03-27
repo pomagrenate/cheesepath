@@ -24,8 +24,8 @@ You execute goals autonomously on the user's machine using available tools.
 CRITICAL RULES:
 1. You MUST respond with valid JSON exactly matching the schema.
 2. If the user's goal involves a spreadsheet, you MUST use the "crabtable" tool.
-3. Do not just reason about the task—actually call the tool to perform it.
-4. You can only reach a goal by using tools and observing results.
+3. Do not just reason about the task—call tools when they are needed, then read observations.
+4. When you have enough information (including after a tool returns empty or an error), stop calling tools and respond with is_final true and final_answer.
 
 RESPONSE FORMAT (JSON ONLY):
 {
@@ -48,7 +48,7 @@ OR when you have actually verified the task is complete:
 Available tools:
 `)
 	sb.WriteString(toolDescs)
-	sb.WriteString("\n\nBe thorough, safe, and precise. Never fabricate results. Use tools to verify.")
+	sb.WriteString("\n\nBe thorough, safe, and precise. Do not invent quoted text from tools; if a tool returned nothing useful, say so in final_answer.")
 	return sb.String()
 }
 
@@ -80,15 +80,9 @@ func (s *ReActStrategy) ParseResponse(raw string) (CrabThought, []CrabToolCall, 
 	return thought, parsed.ToolCalls, nil
 }
 
-// thoughtGrammar is the GBNF grammar enforcing the ReAct JSON format.
-// Passed to cheese-server to constrain model decoding.
+// thoughtGrammar constrains ReAct JSON; root is one line (cheese GBNF rejects a split root rule).
 const thoughtGrammar = `
-root   ::= "{" ws "\"reasoning\"" ws ":" ws string ws
-             ( "," ws "\"plan\"" ws ":" ws string ws )?
-           "," ws "\"is_final\"" ws ":" ws boolean ws
-           ( "," ws "\"final_answer\"" ws ":" ws string ws )?
-           ( "," ws "\"tool_calls\"" ws ":" ws tool-array ws )?
-         "}"
+root ::= "{" ws "\"reasoning\"" ws ":" ws string ws ( "," ws "\"plan\"" ws ":" ws string ws )? "," ws "\"is_final\"" ws ":" ws boolean ws ( "," ws "\"final_answer\"" ws ":" ws string ws )? ( "," ws "\"tool_calls\"" ws ":" ws tool-array ws )? "}"
 tool-array ::= "[" ws ( tool-call ( ws "," ws tool-call )* )? ws "]"
 tool-call  ::= "{" ws "\"tool\"" ws ":" ws string ws "," ws "\"args\"" ws ":" ws object ws "}"
 object     ::= "{" ws ( kv ( ws "," ws kv )* )? ws "}"

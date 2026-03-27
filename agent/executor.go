@@ -87,6 +87,12 @@ func (e *Executor) Run(ctx context.Context, goal string) (<-chan StreamEvent, *C
 			Role:    "user",
 			Content: "Goal: " + goal + "\n\nBegin reasoning.",
 		})
+		_, ragRequired := e.registry.Get("rag_retrieve")
+		_, webFetchAvailable := e.registry.Get("rag_fetch_wikipedia")
+		ragUsed := false
+		webFetched := false
+		sawNoChunks := false
+		haveRetrievedContext := false
 
 		for step := 0; step < e.maxSteps; step++ {
 			events <- StreamEvent{Type: EventThinking, Step: step, Payload: ""}
@@ -160,6 +166,43 @@ func (e *Executor) Run(ctx context.Context, goal string) (<-chan StreamEvent, *C
 			})
 			events <- StreamEvent{Type: EventThought, Step: step, Payload: thought}
 
+			// Guardrail for RAG mode: do not allow final answer before one retrieval call.
+			if thought.IsFinal && ragRequired && !ragUsed {
+				history = append(history,
+					llm.Message{Role: "assistant", Content: raw},
+					llm.Message{
+						Role:    "user",
+						Content: "Before final_answer, you must call rag_retrieve exactly once and then finalize.",
+					},
+				)
+				_ = e.mem.Add(llm.Message{Role: "assistant", Content: raw})
+				continue
+			}
+			// If retrieval returned empty and a fetch tool exists, require fetching real data first.
+			if thought.IsFinal && sawNoChunks && webFetchAvailable && !webFetched {
+				history = append(history,
+					llm.Message{Role: "assistant", Content: raw},
+					llm.Message{
+						Role:    "user",
+						Content: "Retrieval found no chunks. Before final_answer, call rag_fetch_wikipedia, then call rag_retrieve again.",
+					},
+				)
+				_ = e.mem.Add(llm.Message{Role: "assistant", Content: raw})
+				continue
+			}
+			// If we already retrieved context, force model to finalize instead of calling more tools.
+			if haveRetrievedContext && !thought.IsFinal && len(toolCalls) > 0 {
+				history = append(history,
+					llm.Message{Role: "assistant", Content: raw},
+					llm.Message{
+						Role:    "user",
+						Content: "You already have retrieved context. Do not call more tools. Output final JSON now with is_final=true and final_answer.",
+					},
+				)
+				_ = e.mem.Add(llm.Message{Role: "assistant", Content: raw})
+				continue
+			}
+
 			if thought.IsFinal {
 				path.Answer = thought.FinalAnswer
 				path.Status = PathCompleted
@@ -197,11 +240,23 @@ func (e *Executor) Run(ctx context.Context, goal string) (<-chan StreamEvent, *C
 				}
 
 				result, execErr := tool.Execute(ctx, tc.Args)
+				if tc.ToolName == "rag_retrieve" {
+					ragUsed = true
+				}
+				if tc.ToolName == "rag_fetch_wikipedia" && execErr == nil {
+					webFetched = true
+				}
 				if execErr != nil {
 					crabStep.ToolCalls[i].Error = execErr.Error()
 					observations = append(observations, fmt.Sprintf("[%s]: ERROR — %v", tc.ToolName, execErr))
 				} else {
 					crabStep.ToolCalls[i].Result = result
+					if tc.ToolName == "rag_retrieve" && strings.Contains(strings.ToLower(result), "no matching chunks") {
+						sawNoChunks = true
+					}
+					if tc.ToolName == "rag_retrieve" && !strings.Contains(strings.ToLower(result), "no matching chunks") {
+						haveRetrievedContext = true
+					}
 					observations = append(observations, fmt.Sprintf("[%s]: %s", tc.ToolName, result))
 				}
 			}
