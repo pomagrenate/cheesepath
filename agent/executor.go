@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -27,11 +29,11 @@ type Executor struct {
 // ExecutorOption configures an Executor.
 type ExecutorOption func(*Executor)
 
-func WithStrategy(s Strategy) ExecutorOption      { return func(e *Executor) { e.strategy = s } }
-func WithMemory(m memory.Memory) ExecutorOption   { return func(e *Executor) { e.mem = m } }
+func WithStrategy(s Strategy) ExecutorOption          { return func(e *Executor) { e.strategy = s } }
+func WithMemory(m memory.Memory) ExecutorOption       { return func(e *Executor) { e.mem = m } }
 func WithCallbacks(h callback.Handler) ExecutorOption { return func(e *Executor) { e.cbs = h } }
-func WithModel(model string) ExecutorOption        { return func(e *Executor) { e.model = model } }
-func WithMaxSteps(n int) ExecutorOption            { return func(e *Executor) { e.maxSteps = n } }
+func WithModel(model string) ExecutorOption           { return func(e *Executor) { e.model = model } }
+func WithMaxSteps(n int) ExecutorOption               { return func(e *Executor) { e.maxSteps = n } }
 
 // NewExecutor creates an Executor with defaults: ReAct strategy, BufferMemory, 20 steps.
 func NewExecutor(client *llm.Client, registry *tools.Registry, opts ...ExecutorOption) *Executor {
@@ -93,6 +95,9 @@ func (e *Executor) Run(ctx context.Context, goal string) (<-chan StreamEvent, *C
 		goalLower := strings.ToLower(goal)
 		needPortCheck := autonomousPolicy && strings.Contains(goalLower, "port")
 		needHTTPCheck := autonomousPolicy && (strings.Contains(goalLower, "http") || strings.Contains(goalLower, "endpoint") || strings.Contains(goalLower, "health"))
+		goalURL := inferURLFromGoal(goal)
+		forcedExecCommand := inferLocalExecFromGoal(goal)
+		intent := classifyGoalIntent(goal)
 		_, hasRAG := e.registry.Get("rag_retrieve")
 		_, hasWebFetch := e.registry.Get("rag_fetch_wikipedia")
 		ragRequired := ragPolicy && hasRAG
@@ -111,6 +116,34 @@ func (e *Executor) Run(ctx context.Context, goal string) (<-chan StreamEvent, *C
 		didPortCheck := false
 		didHTTPCheck := false
 		idleAfterReady := 0
+		noProgressTurns := 0
+		lastModelJSON := ""
+		lastErrorSig := ""
+		errorStreak := 0
+
+		// Deterministic fast-paths for common autonomous tasks.
+		if autonomousPolicy && deterministicAutonomousEnabled() && forcedExecCommand != "" {
+			if out, ok := runAutoExec(ctx, e, path, events, 0, forcedExecCommand); ok {
+				path.Answer = "Auto-executed local command:\n" + out
+				path.Status = PathCompleted
+				events <- StreamEvent{Type: EventFinalAnswer, Step: 0, Payload: path.Answer}
+				e.cbs.OnFinalAnswer(path.Answer)
+				return
+			}
+		}
+		if autonomousPolicy && deterministicAutonomousEnabled() && needHTTPCheck && goalURL != "" {
+			if runAutoVerify(ctx, e, path, events, 0, "http_check", map[string]any{"url": goalURL}) {
+				ans := summarizeReady(path.Steps)
+				if strings.TrimSpace(ans) == "" {
+					ans = "Auto-verified endpoint: " + goalURL
+				}
+				path.Answer = ans
+				path.Status = PathCompleted
+				events <- StreamEvent{Type: EventFinalAnswer, Step: 0, Payload: path.Answer}
+				e.cbs.OnFinalAnswer(path.Answer)
+				return
+			}
+		}
 
 		for step := 0; step < e.maxSteps; step++ {
 			events <- StreamEvent{Type: EventThinking, Step: step, Payload: ""}
@@ -167,19 +200,34 @@ func (e *Executor) Run(ctx context.Context, goal string) (<-chan StreamEvent, *C
 			}
 
 			if raw == "" {
+				noProgressTurns++
 				history = append(history, llm.Message{
 					Role:    "user",
 					Content: "Your response was empty. Please provide a JSON block as requested.",
 				})
+				if noProgressTurns >= 3 {
+					history = append(history, llm.Message{
+						Role:    "user",
+						Content: "No progress detected for multiple turns. You must either call exactly one relevant tool now or provide final_answer if done.",
+					})
+				}
 				continue
 			}
+			lastModelJSON = raw
 
 			thought, toolCalls, err := e.strategy.ParseResponse(raw)
 			if err != nil {
+				noProgressTurns++
 				history = append(history, llm.Message{
 					Role:    "user",
 					Content: "Your response was invalid JSON. Please provide exactly one JSON block.",
 				})
+				if noProgressTurns >= 3 {
+					history = append(history, llm.Message{
+						Role:    "user",
+						Content: "Stop format errors: output strict JSON matching grammar. If stuck, call one diagnostic tool.",
+					})
+				}
 				continue
 			}
 
@@ -190,6 +238,31 @@ func (e *Executor) Run(ctx context.Context, goal string) (<-chan StreamEvent, *C
 				FinalAnswer: thought.FinalAnswer,
 			})
 			events <- StreamEvent{Type: EventThought, Step: step, Payload: thought}
+			if autonomousPolicy && len(toolCalls) > 0 {
+				toolCalls = applyIntentToolPolicy(toolCalls, intent)
+			}
+			if autonomousPolicy && deterministicAutonomousEnabled() && len(path.Steps) == 0 && needHTTPCheck && goalURL != "" {
+				if runAutoVerify(ctx, e, path, events, step, "http_check", map[string]any{"url": goalURL}) {
+					ans := summarizeReady(path.Steps)
+					if strings.TrimSpace(ans) == "" {
+						ans = "Auto-verified endpoint: " + goalURL
+					}
+					path.Answer = ans
+					path.Status = PathCompleted
+					events <- StreamEvent{Type: EventFinalAnswer, Step: step, Payload: path.Answer}
+					e.cbs.OnFinalAnswer(path.Answer)
+					return
+				}
+			}
+			if autonomousPolicy && deterministicAutonomousEnabled() && len(path.Steps) == 0 && forcedExecCommand != "" {
+				if out, ok := runAutoExec(ctx, e, path, events, step, forcedExecCommand); ok {
+					path.Answer = "Auto-executed local command:\n" + out
+					path.Status = PathCompleted
+					events <- StreamEvent{Type: EventFinalAnswer, Step: step, Payload: path.Answer}
+					e.cbs.OnFinalAnswer(path.Answer)
+					return
+				}
+			}
 			if !thought.IsFinal && execSucceeded && len(toolCalls) == 0 {
 				if autonomousPolicy && usedVerify && !lastVerifyFailed {
 					idleAfterReady++
@@ -227,9 +300,24 @@ func (e *Executor) Run(ctx context.Context, goal string) (<-chan StreamEvent, *C
 			}
 			if len(toolCalls) > 0 {
 				idleAfterReady = 0
+				noProgressTurns = 0
+			} else if !thought.IsFinal {
+				noProgressTurns++
 			}
 			// Autonomous policy: if commands/services were executed, require verification before finalize.
 			if thought.IsFinal && autonomousPolicy && len(path.Steps) == 0 {
+				if goalURL != "" && runAutoVerify(ctx, e, path, events, step, "http_check", map[string]any{"url": goalURL}) {
+					didHTTPCheck = true
+					usedVerify = true
+					lastVerifyFailed = false
+					if ans := summarizeReady(path.Steps); strings.TrimSpace(ans) != "" {
+						path.Answer = ans
+						path.Status = PathCompleted
+						events <- StreamEvent{Type: EventFinalAnswer, Step: step, Payload: ans}
+						e.cbs.OnFinalAnswer(ans)
+						return
+					}
+				}
 				history = append(history,
 					llm.Message{Role: "assistant", Content: raw},
 					llm.Message{
@@ -377,6 +465,22 @@ func (e *Executor) Run(ctx context.Context, goal string) (<-chan StreamEvent, *C
 				_ = e.mem.Add(llm.Message{Role: "assistant", Content: raw})
 				return
 			}
+			if noProgressTurns >= 4 {
+				if autonomousPolicy && usedExecAction && !usedVerify {
+					history = append(history,
+						llm.Message{Role: "assistant", Content: raw},
+						llm.Message{Role: "user", Content: "No-progress detected. Immediately run port_check or http_check now."},
+					)
+					_ = e.mem.Add(llm.Message{Role: "assistant", Content: raw})
+					continue
+				}
+				history = append(history,
+					llm.Message{Role: "assistant", Content: raw},
+					llm.Message{Role: "user", Content: "No-progress detected. Choose one decisive next action: run one tool or finalize with concrete answer."},
+				)
+				_ = e.mem.Add(llm.Message{Role: "assistant", Content: raw})
+				continue
+			}
 
 			// Execute tool calls
 			crabStep := CrabStep{Index: step, Thought: thought, ToolCalls: toolCalls}
@@ -445,6 +549,10 @@ func (e *Executor) Run(ctx context.Context, goal string) (<-chan StreamEvent, *C
 					if tc.ToolName == "port_check" || tc.ToolName == "http_check" {
 						lastVerifyFailed = true
 						usedVerify = true
+						if !usedInspect {
+							_ = runAutoInspect(ctx, e, path, events, step)
+							usedInspect = true
+						}
 					}
 					if hint := remediationHint(tc.ToolName, execErr.Error()); hint != "" {
 						history = append(history, llm.Message{
@@ -482,6 +590,18 @@ func (e *Executor) Run(ctx context.Context, goal string) (<-chan StreamEvent, *C
 			obs := strings.Join(observations, "\n")
 			crabStep.Observation = obs
 			path.Steps = append(path.Steps, crabStep)
+			errSig := stepErrorSignature(crabStep)
+			if strings.TrimSpace(errSig) != "" {
+				if errSig == lastErrorSig {
+					errorStreak++
+				} else {
+					lastErrorSig = errSig
+					errorStreak = 1
+				}
+			} else {
+				lastErrorSig = ""
+				errorStreak = 0
+			}
 
 			events <- StreamEvent{Type: EventObservation, Step: step, Payload: obs}
 			e.cbs.OnObservation(step, obs)
@@ -491,6 +611,23 @@ func (e *Executor) Run(ctx context.Context, goal string) (<-chan StreamEvent, *C
 				llm.Message{Role: "user", Content: "Observation:\n" + obs + "\n\nContinue reasoning toward the goal."},
 			)
 			_ = e.mem.Add(llm.Message{Role: "assistant", Content: raw})
+			if autonomousPolicy && errorStreakThreshold() > 0 && errorStreak >= errorStreakThreshold() {
+				path.Status = PathFailed
+				ans := summarizeFromSteps(path.Steps)
+				if strings.TrimSpace(ans) == "" {
+					ans = "Auto-summary: repeated tool errors detected; stopping early to avoid infinite retries."
+				}
+				path.Answer = ans
+				events <- StreamEvent{Type: EventFinalAnswer, Step: step, Payload: ans}
+				e.cbs.OnFinalAnswer(ans)
+				events <- StreamEvent{
+					Type:    EventError,
+					Step:    step,
+					Payload: "stopped early due to repeated identical tool errors",
+				}
+				e.cbs.OnError(fmt.Errorf("repeated identical tool errors"))
+				return
+			}
 		}
 
 		path.Status = PathFailed
@@ -499,6 +636,13 @@ func (e *Executor) Run(ctx context.Context, goal string) (<-chan StreamEvent, *C
 				path.Answer = ans
 				events <- StreamEvent{Type: EventFinalAnswer, Step: e.maxSteps, Payload: ans}
 				e.cbs.OnFinalAnswer(ans)
+			} else if strings.TrimSpace(lastModelJSON) != "" {
+				ans := summarizeFromLastJSON(lastModelJSON)
+				if strings.TrimSpace(ans) != "" {
+					path.Answer = ans
+					events <- StreamEvent{Type: EventFinalAnswer, Step: e.maxSteps, Payload: ans}
+					e.cbs.OnFinalAnswer(ans)
+				}
 			}
 		}
 		events <- StreamEvent{
@@ -645,6 +789,13 @@ func hasToolCall(calls []CrabToolCall, name string) bool {
 }
 
 func inferPortFromGoal(goal string) int {
+	re := regexp.MustCompile(`\b([0-9]{2,5})\b`)
+	matches := re.FindAllString(goal, -1)
+	for _, m := range matches {
+		if p, err := strconv.Atoi(m); err == nil && p > 0 && p <= 65535 {
+			return p
+		}
+	}
 	low := strings.ToLower(goal)
 	// common defaults
 	if strings.Contains(low, "8080") {
@@ -657,6 +808,238 @@ func inferPortFromGoal(goal string) int {
 		return 5173
 	}
 	return 8080
+}
+
+func inferURLFromGoal(goal string) string {
+	re := regexp.MustCompile(`https?://[^\s"']+`)
+	if u := strings.TrimSpace(re.FindString(goal)); u != "" {
+		return strings.TrimRight(u, ".,;)")
+	}
+	return ""
+}
+
+func inferLocalExecFromGoal(goal string) string {
+	focus := focusedUserGoal(goal)
+	low := strings.ToLower(focus)
+	path := inferPathFromGoal(focus)
+	if strings.Contains(low, "tail log") || strings.Contains(low, "show logs") || strings.Contains(low, "read logs") {
+		if path != "" {
+			return "tail -n 120 " + shellQuote(path)
+		}
+		return "ls -la .cache"
+	}
+	if strings.Contains(low, "read file") || strings.Contains(low, "show file") || strings.Contains(low, "cat file") {
+		if path != "" {
+			return "sed -n '1,200p' " + shellQuote(path)
+		}
+	}
+	if strings.Contains(low, "git status") {
+		return "git status --short"
+	}
+	if strings.Contains(low, "git diff") {
+		return "git diff --stat"
+	}
+	if strings.Contains(low, "working directory") || strings.Contains(low, "current directory") || strings.Contains(low, "pwd") {
+		return "pwd"
+	}
+	if strings.Contains(low, "run tests") || strings.Contains(low, "go test") {
+		if path != "" {
+			return "go test " + shellQuote(path)
+		}
+		return "go test ./cmd/cheeserag-agent ./cmd/cheeserag-ingest"
+	}
+	if strings.Contains(low, "list dir") || strings.Contains(low, "list directory") || strings.Contains(low, "list folder") {
+		if path != "" {
+			return "ls -la " + shellQuote(path)
+		}
+	}
+	if strings.Contains(low, "list files") || strings.Contains(low, "list all files") || strings.Contains(low, "ls -la") {
+		if p := inferPathFromGoal(goal); p != "" {
+			return "ls -la " + shellQuote(p)
+		}
+	}
+	if strings.Contains(low, "list") && strings.Contains(low, "file") {
+		switch {
+		case strings.Contains(low, "root"), strings.Contains(low, "cheeserag"):
+			return "ls -la /home/autocookie/pomaieco/cheeserag"
+		case strings.Contains(low, "current directory"), strings.Contains(low, "current dir"):
+			return "ls -la"
+		default:
+			return "ls -la"
+		}
+	}
+	if strings.Contains(low, "show working directory") || strings.Contains(low, "print working directory") {
+		return "pwd"
+	}
+	return ""
+}
+
+type goalIntent string
+
+const (
+	intentGeneral   goalIntent = "general"
+	intentReadOnly  goalIntent = "readonly"
+	intentHTTPCheck goalIntent = "http_check"
+	intentRunTests  goalIntent = "run_tests"
+)
+
+func classifyGoalIntent(goal string) goalIntent {
+	focus := strings.ToLower(focusedUserGoal(goal))
+	if strings.Contains(focus, "http://") || strings.Contains(focus, "https://") || strings.Contains(focus, "health endpoint") || strings.Contains(focus, "check endpoint") {
+		return intentHTTPCheck
+	}
+	if strings.Contains(focus, "run tests") || strings.Contains(focus, "go test") {
+		return intentRunTests
+	}
+	if strings.Contains(focus, "list file") ||
+		strings.Contains(focus, "list files") ||
+		strings.Contains(focus, "list all files") ||
+		strings.Contains(focus, "list directory") ||
+		strings.Contains(focus, "list folder") ||
+		strings.Contains(focus, "read file") ||
+		strings.Contains(focus, "show file") ||
+		strings.Contains(focus, "tail log") ||
+		strings.Contains(focus, "show logs") ||
+		strings.Contains(focus, "pwd") ||
+		strings.Contains(focus, "working directory") ||
+		strings.Contains(focus, "git status") ||
+		strings.Contains(focus, "git diff") {
+		return intentReadOnly
+	}
+	return intentGeneral
+}
+
+func applyIntentToolPolicy(calls []CrabToolCall, intent goalIntent) []CrabToolCall {
+	if len(calls) == 0 {
+		return calls
+	}
+	if !deterministicAutonomousEnabled() {
+		return calls
+	}
+	allowed := map[string]bool{}
+	switch intent {
+	case intentHTTPCheck:
+		allowed["http_check"] = true
+		allowed["port_check"] = true
+	case intentReadOnly, intentRunTests:
+		allowed["local_exec"] = true
+		allowed["http_check"] = true
+		allowed["port_check"] = true
+	default:
+		return calls
+	}
+	out := make([]CrabToolCall, 0, len(calls))
+	for _, c := range calls {
+		if allowed[c.ToolName] {
+			out = append(out, c)
+		}
+	}
+	return out
+}
+
+func deterministicAutonomousEnabled() bool {
+	v := strings.TrimSpace(strings.ToLower(os.Getenv("CHEESERAG_DETERMINISTIC_AUTONOMOUS")))
+	return v == "" || v == "1" || v == "true" || v == "yes" || v == "on"
+}
+
+func inferPathFromGoal(goal string) string {
+	relRe := regexp.MustCompile(`(\./[^\s"']+)`)
+	if m := relRe.FindStringSubmatch(goal); len(m) >= 2 {
+		return strings.TrimRight(m[1], ".,;)")
+	}
+	absRe := regexp.MustCompile(`(/(?:[^\s"']+))`)
+	allAbs := absRe.FindAllString(goal, -1)
+	for i := len(allAbs) - 1; i >= 0; i-- {
+		p := strings.TrimRight(allAbs[i], ".,;)")
+		if p == "/dev" || strings.HasPrefix(p, "/proc_") || strings.HasPrefix(p, "/v1/") || strings.HasPrefix(p, "/cmd/") {
+			continue
+		}
+		return p
+	}
+	return ""
+}
+
+func focusedUserGoal(goal string) string {
+	goal = strings.TrimSpace(goal)
+	parts := strings.Split(goal, "\n\n")
+	if len(parts) == 0 {
+		return goal
+	}
+	return strings.TrimSpace(parts[len(parts)-1])
+}
+
+func shellQuote(s string) string {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return "''"
+	}
+	// Safe single-quote escape: ' -> '\''.
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
+}
+
+func errorStreakThreshold() int {
+	v := strings.TrimSpace(os.Getenv("CHEESERAG_AUTONOMOUS_ERROR_STREAK"))
+	if v == "" {
+		return 2
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil {
+		return 2
+	}
+	if n < 0 {
+		return 0
+	}
+	if n > 10 {
+		return 10
+	}
+	return n
+}
+
+func stepErrorSignature(st CrabStep) string {
+	var parts []string
+	for _, tc := range st.ToolCalls {
+		if strings.TrimSpace(tc.Error) == "" {
+			continue
+		}
+		parts = append(parts, tc.ToolName+":"+oneLine(tc.Error, 120))
+	}
+	return strings.Join(parts, "|")
+}
+
+func summarizeFromLastJSON(raw string) string {
+	s := strings.TrimSpace(raw)
+	if s == "" {
+		return ""
+	}
+	return "Auto-summary (no finalized answer): last model response was non-final or malformed; run ended by step limit."
+}
+
+func runAutoInspect(ctx context.Context, e *Executor, path *CrabPath, events chan<- StreamEvent, step int) bool {
+	if tool, ok := e.registry.Get("proc_list"); ok {
+		tc := CrabToolCall{ToolName: "proc_list", Args: map[string]any{}, Dangerous: tool.Dangerous()}
+		e.cbs.OnToolCall(step, callback.ToolCallEvent{ToolName: tc.ToolName, Args: tc.Args, Dangerous: tc.Dangerous})
+		res, err := tool.Execute(ctx, tc.Args)
+		if err != nil {
+			tc.Error = err.Error()
+		} else {
+			tc.Result = res
+		}
+		crabStep := CrabStep{
+			Index: step,
+			Thought: CrabThought{
+				Reasoning: "auto inspect injected after verify failure",
+				Plan:      "list managed processes for diagnostics",
+				IsFinal:   false,
+			},
+			ToolCalls:   []CrabToolCall{tc},
+			Observation: fmt.Sprintf("[%s]: %s", tc.ToolName, oneLine(firstNonEmpty(tc.Result, tc.Error), 200)),
+		}
+		path.Steps = append(path.Steps, crabStep)
+		events <- StreamEvent{Type: EventObservation, Step: step, Payload: crabStep.Observation}
+		e.cbs.OnObservation(step, crabStep.Observation)
+		return err == nil
+	}
+	return false
 }
 
 func runAutoVerify(ctx context.Context, e *Executor, path *CrabPath, events chan<- StreamEvent, step int, toolName string, args map[string]any) bool {
@@ -686,6 +1069,43 @@ func runAutoVerify(ctx context.Context, e *Executor, path *CrabPath, events chan
 	events <- StreamEvent{Type: EventObservation, Step: step, Payload: crabStep.Observation}
 	e.cbs.OnObservation(step, crabStep.Observation)
 	return err == nil
+}
+
+func runAutoExec(ctx context.Context, e *Executor, path *CrabPath, events chan<- StreamEvent, step int, command string) (string, bool) {
+	tool, ok := e.registry.Get("local_exec")
+	if !ok {
+		return "", false
+	}
+	tc := CrabToolCall{
+		ToolName:  "local_exec",
+		Args:      map[string]any{"command": command},
+		Dangerous: tool.Dangerous(),
+	}
+	e.cbs.OnToolCall(step, callback.ToolCallEvent{
+		ToolName:  tc.ToolName,
+		Args:      tc.Args,
+		Dangerous: tc.Dangerous,
+	})
+	result, err := tool.Execute(ctx, tc.Args)
+	if err != nil {
+		tc.Error = err.Error()
+	} else {
+		tc.Result = result
+	}
+	crabStep := CrabStep{
+		Index: step,
+		Thought: CrabThought{
+			Reasoning: "auto execution injected by executor",
+			Plan:      "run local command to satisfy explicit goal",
+			IsFinal:   false,
+		},
+		ToolCalls:   []CrabToolCall{tc},
+		Observation: fmt.Sprintf("[%s]: %s", tc.ToolName, oneLine(firstNonEmpty(tc.Result, tc.Error), 200)),
+	}
+	path.Steps = append(path.Steps, crabStep)
+	events <- StreamEvent{Type: EventObservation, Step: step, Payload: crabStep.Observation}
+	e.cbs.OnObservation(step, crabStep.Observation)
+	return tc.Result, err == nil
 }
 
 func firstNonEmpty(a, b string) string {
