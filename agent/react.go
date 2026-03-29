@@ -45,6 +45,32 @@ OR when you have actually verified the task is complete:
   "tool_calls": []
 }
 
+EXAMPLES:
+
+User: hello
+{
+  "reasoning": "Simple greeting, no tools needed.",
+  "is_final": true,
+  "final_answer": "Hello! How can I help you today?",
+  "tool_calls": []
+}
+
+User: what is the current project version?
+{
+  "reasoning": "I need to check the project files for a version string.",
+  "plan": "List files in the current directory to find a VERSION or package file.",
+  "is_final": false,
+  "tool_calls": [{"tool": "list_dir", "args": {"path": "."}}]
+}
+
+User: what is quantum entanglement?
+{
+  "reasoning": "This is a factual question. I should search the local PomaiDB database.",
+  "plan": "Fetch context from the local store.",
+  "is_final": false,
+  "tool_calls": [{"tool": "rag_retrieve", "args": {"query": "what is quantum entanglement"}}]
+}
+
 Available tools:
 `)
 	sb.WriteString(toolDescs)
