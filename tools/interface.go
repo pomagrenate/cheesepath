@@ -61,5 +61,6 @@ func DefaultRegistry(cheesecrabAddr string) *Registry {
 	r.Register(NewGitTool())
 	r.Register(NewHTTPRequestTool())
 	r.Register(NewCrabTableTool())
+	r.Register(NewMultiReplaceFileContentTool())
 	return r
 }

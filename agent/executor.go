@@ -7,6 +7,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/AutoCookies/crabpath/callback"
@@ -504,88 +505,104 @@ func (e *Executor) Run(ctx context.Context, goal string) (<-chan StreamEvent, *C
 				continue
 			}
 
+			var wg sync.WaitGroup
+			var mu sync.Mutex
+
 			for i, tc := range toolCalls {
-				tool, ok := e.registry.Get(tc.ToolName)
-				if !ok {
-					crabStep.ToolCalls[i].Error = "unknown tool: " + tc.ToolName
-					observations = append(observations, fmt.Sprintf("[%s]: ERROR — unknown tool", tc.ToolName))
-					continue
-				}
+				wg.Add(1)
+				go func(idx int, call CrabToolCall) {
+					defer wg.Done()
 
-				crabStep.ToolCalls[i].Dangerous = tool.Dangerous()
-				e.cbs.OnToolCall(step, callback.ToolCallEvent{
-					ToolName:  tc.ToolName,
-					Args:      tc.Args,
-					Dangerous: tool.Dangerous(),
-				})
-
-				if tool.Dangerous() {
-					events <- StreamEvent{Type: EventApprovalReq, Step: step, Payload: tc}
-				}
-
-				if tc.ToolName == "crabtable" {
-					events <- StreamEvent{Type: EventCrabTableReq, Step: step, Payload: tc}
-				}
-
-				result, execErr := tool.Execute(ctx, tc.Args)
-				if tc.ToolName == "local_exec" || tc.ToolName == "proc_start" || tc.ToolName == "proc_stop" {
-					usedExecAction = true
-				}
-				if tc.ToolName == "proc_status" || tc.ToolName == "proc_logs" || tc.ToolName == "proc_list" {
-					usedInspect = true
-				}
-				if tc.ToolName == "rag_retrieve" {
-					ragUsed = true
-				}
-				if tc.ToolName == "rag_fetch_wikipedia" && execErr == nil {
-					webFetched = true
-				}
-				if tc.ToolName == "local_exec" && execErr == nil {
-					execSucceeded = true
-				}
-				if execErr != nil {
-					crabStep.ToolCalls[i].Error = execErr.Error()
-					observations = append(observations, fmt.Sprintf("[%s]: ERROR — %v", tc.ToolName, execErr))
-					if tc.ToolName == "port_check" || tc.ToolName == "http_check" {
-						lastVerifyFailed = true
-						usedVerify = true
-						if !usedInspect {
-							_ = runAutoInspect(ctx, e, path, events, step)
-							usedInspect = true
-						}
+					tool, ok := e.registry.Get(call.ToolName)
+					
+					mu.Lock()
+					if !ok {
+						crabStep.ToolCalls[idx].Error = "unknown tool: " + call.ToolName
+						observations = append(observations, fmt.Sprintf("[%s]: ERROR — unknown tool", call.ToolName))
+						mu.Unlock()
+						return
 					}
-					if hint := remediationHint(tc.ToolName, execErr.Error()); hint != "" {
-						history = append(history, llm.Message{
-							Role:    "user",
-							Content: "Tool-call correction: " + hint,
-						})
+
+					crabStep.ToolCalls[idx].Dangerous = tool.Dangerous()
+					e.cbs.OnToolCall(step, callback.ToolCallEvent{
+						ToolName:  call.ToolName,
+						Args:      call.Args,
+						Dangerous: tool.Dangerous(),
+					})
+
+					if tool.Dangerous() {
+						events <- StreamEvent{Type: EventApprovalReq, Step: step, Payload: call}
 					}
-				} else {
-					crabStep.ToolCalls[i].Result = result
-					if tc.ToolName == "port_check" || tc.ToolName == "http_check" {
-						usedVerify = true
-						lowRes := strings.ToLower(result)
-						if tc.ToolName == "port_check" {
-							didPortCheck = true
-						}
-						if tc.ToolName == "http_check" {
-							didHTTPCheck = true
-						}
-						if strings.Contains(lowRes, "listening=false") || strings.Contains(lowRes, "status=5") || strings.Contains(lowRes, "status=4") {
+					if call.ToolName == "crabtable" {
+						events <- StreamEvent{Type: EventCrabTableReq, Step: step, Payload: call}
+					}
+					mu.Unlock()
+
+					result, execErr := tool.Execute(ctx, call.Args)
+
+					mu.Lock()
+					defer mu.Unlock()
+					if call.ToolName == "local_exec" || call.ToolName == "proc_start" || call.ToolName == "proc_stop" {
+						usedExecAction = true
+					}
+					if call.ToolName == "proc_status" || call.ToolName == "proc_logs" || call.ToolName == "proc_list" {
+						usedInspect = true
+					}
+					if call.ToolName == "rag_retrieve" {
+						ragUsed = true
+					}
+					if call.ToolName == "rag_fetch_wikipedia" && execErr == nil {
+						webFetched = true
+					}
+					if call.ToolName == "local_exec" && execErr == nil {
+						execSucceeded = true
+					}
+					
+					if execErr != nil {
+						crabStep.ToolCalls[idx].Error = execErr.Error()
+						observations = append(observations, fmt.Sprintf("[%s]: ERROR — %v", call.ToolName, execErr))
+						if call.ToolName == "port_check" || call.ToolName == "http_check" {
 							lastVerifyFailed = true
-						} else {
-							lastVerifyFailed = false
+							usedVerify = true
+							if !usedInspect {
+								_ = runAutoInspect(ctx, e, path, events, step)
+								usedInspect = true
+							}
 						}
+						if hint := remediationHint(call.ToolName, execErr.Error()); hint != "" {
+							history = append(history, llm.Message{
+								Role:    "user",
+								Content: "Tool-call correction: " + hint,
+							})
+						}
+					} else {
+						crabStep.ToolCalls[idx].Result = result
+						if call.ToolName == "port_check" || call.ToolName == "http_check" {
+							usedVerify = true
+							lowRes := strings.ToLower(result)
+							if call.ToolName == "port_check" {
+								didPortCheck = true
+							}
+							if call.ToolName == "http_check" {
+								didHTTPCheck = true
+							}
+							if strings.Contains(lowRes, "listening=false") || strings.Contains(lowRes, "status=5") || strings.Contains(lowRes, "status=4") {
+								lastVerifyFailed = true
+							} else {
+								lastVerifyFailed = false
+							}
+						}
+						if call.ToolName == "rag_retrieve" && strings.Contains(strings.ToLower(result), "no matching chunks") {
+							sawNoChunks = true
+						}
+						if call.ToolName == "rag_retrieve" && !strings.Contains(strings.ToLower(result), "no matching chunks") {
+							haveRetrievedContext = true
+						}
+						observations = append(observations, fmt.Sprintf("[%s]: %s", call.ToolName, result))
 					}
-					if tc.ToolName == "rag_retrieve" && strings.Contains(strings.ToLower(result), "no matching chunks") {
-						sawNoChunks = true
-					}
-					if tc.ToolName == "rag_retrieve" && !strings.Contains(strings.ToLower(result), "no matching chunks") {
-						haveRetrievedContext = true
-					}
-					observations = append(observations, fmt.Sprintf("[%s]: %s", tc.ToolName, result))
-				}
+				}(i, tc)
 			}
+			wg.Wait()
 
 			obs := strings.Join(observations, "\n")
 			crabStep.Observation = obs
