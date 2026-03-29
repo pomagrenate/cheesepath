@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"os/exec"
 	"strings"
 )
 
@@ -55,6 +56,14 @@ func (t *MultiReplaceFileContentTool) Execute(ctx context.Context, args map[stri
 	err = os.WriteFile(target, []byte(res), 0644)
 	if err != nil {
 		return "", err
+	}
+
+	// Post-edit formatting hook
+	if strings.HasSuffix(target, ".go") {
+		_ = exec.Command("gofmt", "-w", target).Run()
+	} else if strings.HasSuffix(target, ".py") {
+		// Try running black
+		_ = exec.Command("python3", "-m", "black", target).Run()
 	}
 
 	return "Replacement successful.", nil

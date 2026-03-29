@@ -53,6 +53,8 @@ func NewExecutor(client *llm.Client, registry *tools.Registry, opts ...ExecutorO
 	return e
 }
 
+func (e *Executor) Client() *llm.Client { return e.client }
+
 // Run executes the agent loop for goal, streaming events on the returned channel.
 // The channel is closed when the run ends. Drain it fully to avoid goroutine leaks.
 func (e *Executor) Run(ctx context.Context, goal string) (<-chan StreamEvent, *CrabPath) {
