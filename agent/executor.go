@@ -18,13 +18,16 @@ import (
 
 // Executor orchestrates a full agent run: strategy + tools + memory + callbacks.
 type Executor struct {
-	client   *llm.Client
-	strategy Strategy
-	registry *tools.Registry
-	mem      memory.Memory
-	cbs      callback.Handler
-	model    string
-	maxSteps int
+	client          *llm.Client
+	strategy        Strategy
+	registry        *tools.Registry
+	mem             memory.Memory
+	cbs             callback.Handler
+	model           string
+	maxSteps        int
+	approver        Approver
+	checkpointPath  string
+	checkpointEvery int
 }
 
 // ExecutorOption configures an Executor.
@@ -35,6 +38,7 @@ func WithMemory(m memory.Memory) ExecutorOption       { return func(e *Executor)
 func WithCallbacks(h callback.Handler) ExecutorOption { return func(e *Executor) { e.cbs = h } }
 func WithModel(model string) ExecutorOption           { return func(e *Executor) { e.model = model } }
 func WithMaxSteps(n int) ExecutorOption               { return func(e *Executor) { e.maxSteps = n } }
+func WithApprover(a Approver) ExecutorOption          { return func(e *Executor) { e.approver = a } }
 
 // NewExecutor creates an Executor with defaults: ReAct strategy, BufferMemory, 20 steps.
 func NewExecutor(client *llm.Client, registry *tools.Registry, opts ...ExecutorOption) *Executor {
@@ -46,6 +50,7 @@ func NewExecutor(client *llm.Client, registry *tools.Registry, opts ...ExecutorO
 		cbs:      callback.NoopHandler{},
 		model:    "default",
 		maxSteps: 20,
+		approver: AllowAllApprover{},
 	}
 	for _, o := range opts {
 		o(e)
@@ -53,7 +58,8 @@ func NewExecutor(client *llm.Client, registry *tools.Registry, opts ...ExecutorO
 	return e
 }
 
-func (e *Executor) Client() *llm.Client { return e.client }
+func (e *Executor) Client() *llm.Client       { return e.client }
+func (e *Executor) Registry() *tools.Registry { return e.registry }
 
 // SetStrategy swaps the active strategy for subsequent Run calls.
 // Safe to call between runs (not during an active Run goroutine).
@@ -62,6 +68,15 @@ func (e *Executor) SetStrategy(s Strategy) { e.strategy = s }
 // SetMemory swaps the active memory for subsequent Run calls.
 // Safe to call between runs (not during an active Run goroutine).
 func (e *Executor) SetMemory(m memory.Memory) { e.mem = m }
+
+// SetApprover swaps the dangerous-tool approver for subsequent Run calls.
+func (e *Executor) SetApprover(a Approver) { e.approver = a }
+
+// SetModel changes the LLM model used for subsequent Run calls.
+func (e *Executor) SetModel(m string) { e.model = m }
+
+// Model returns the current LLM model name.
+func (e *Executor) Model() string { return e.model }
 
 // Run executes the agent loop for goal, streaming events on the returned channel.
 // The channel is closed when the run ends. Drain it fully to avoid goroutine leaks.
@@ -549,6 +564,11 @@ func (e *Executor) Run(ctx context.Context, goal string) (<-chan StreamEvent, *C
 
 					if tool.Dangerous() {
 						events <- StreamEvent{Type: EventApprovalReq, Step: step, Payload: call}
+						if !e.approver.Approve(ctx, call.ToolName, call.Args) {
+							observations = append(observations, fmt.Sprintf("[%s]: blocked by approver policy", call.ToolName))
+							mu.Unlock()
+							return
+						}
 					}
 					if call.ToolName == "crabtable" {
 						events <- StreamEvent{Type: EventCrabTableReq, Step: step, Payload: call}
@@ -645,6 +665,9 @@ func (e *Executor) Run(ctx context.Context, goal string) (<-chan StreamEvent, *C
 				llm.Message{Role: "user", Content: "Observation:\n" + obs + "\n\nContinue reasoning toward the goal."},
 			)
 			_ = e.mem.Add(llm.Message{Role: "assistant", Content: raw})
+			if e.checkpointPath != "" && e.checkpointEvery > 0 && (step+1)%e.checkpointEvery == 0 {
+				_ = SaveCheckpoint(e.checkpointPath, path.ID, goal, e.strategy.Name(), step+1, e.mem.Messages())
+			}
 			if autonomousPolicy && errorStreakThreshold() > 0 && errorStreak >= errorStreakThreshold() {
 				path.Status = PathFailed
 				ans := summarizeFromSteps(path.Steps)
