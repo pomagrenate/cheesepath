@@ -107,7 +107,7 @@ func (s *ReActStrategy) ParseResponse(raw string) (CrabThought, []CrabToolCall, 
 }
 
 // thoughtGrammar constrains ReAct JSON; root is one line (cheese GBNF rejects a split root rule).
-const thoughtGrammar = `
+var thoughtGrammar = `
 root ::= "{" ws "\"reasoning\"" ws ":" ws string ws ( "," ws "\"plan\"" ws ":" ws string ws )? "," ws "\"is_final\"" ws ":" ws boolean ws ( "," ws "\"final_answer\"" ws ":" ws string ws )? ( "," ws "\"tool_calls\"" ws ":" ws tool-array ws )? "}"
 tool-array ::= "[" ws ( tool-call ( ws "," ws tool-call )* )? ws "]"
 tool-call  ::= "{" ws "\"tool\"" ws ":" ws string ws "," ws "\"args\"" ws ":" ws object ws "}"

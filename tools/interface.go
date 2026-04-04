@@ -65,5 +65,10 @@ func DefaultRegistry(cheesecrabAddr string) *Registry {
 	r.Register(NewRunPythonTestTool())
 	r.Register(NewRunGoTestTool())
 	r.Register(NewRunLinterTool())
+	// Extended tools: diff, search, JSON query, web fetch
+	r.Register(NewDiffFilesTool())
+	r.Register(NewGrepInFilesTool())
+	r.Register(NewJSONQueryTool())
+	r.Register(NewWebFetchTool())
 	return r
 }

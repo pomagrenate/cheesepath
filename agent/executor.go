@@ -55,6 +55,14 @@ func NewExecutor(client *llm.Client, registry *tools.Registry, opts ...ExecutorO
 
 func (e *Executor) Client() *llm.Client { return e.client }
 
+// SetStrategy swaps the active strategy for subsequent Run calls.
+// Safe to call between runs (not during an active Run goroutine).
+func (e *Executor) SetStrategy(s Strategy) { e.strategy = s }
+
+// SetMemory swaps the active memory for subsequent Run calls.
+// Safe to call between runs (not during an active Run goroutine).
+func (e *Executor) SetMemory(m memory.Memory) { e.mem = m }
+
 // Run executes the agent loop for goal, streaming events on the returned channel.
 // The channel is closed when the run ends. Drain it fully to avoid goroutine leaks.
 func (e *Executor) Run(ctx context.Context, goal string) (<-chan StreamEvent, *CrabPath) {
@@ -83,10 +91,17 @@ func (e *Executor) Run(ctx context.Context, goal string) (<-chan StreamEvent, *C
 		}
 
 		// Seed history from memory + new system prompt.
+		// If the memory supports semantic retrieval, use it for richer context seeding.
+		var memMsgs []llm.Message
+		if sm, ok := e.mem.(memory.SemanticMemory); ok {
+			memMsgs, _ = sm.Retrieve(goal, 10)
+		} else {
+			memMsgs = e.mem.Messages()
+		}
 		history := []llm.Message{
 			{Role: "system", Content: e.strategy.BuildSystemPrompt(toolDescs.String())},
 		}
-		for _, m := range e.mem.Messages() {
+		for _, m := range memMsgs {
 			history = append(history, m)
 		}
 		history = append(history, llm.Message{
