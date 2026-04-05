@@ -73,14 +73,15 @@ type PanelResult struct {
 
 // Panel orchestrates concurrent multi-role agents then synthesizes their answers.
 type Panel struct {
-	client    *llm.Client
-	registry  *tools.Registry
-	model     string
-	roles     []Role
-	maxSteps  int
-	synthMode SynthMode
-	cbs       callback.Handler
-	displayW  io.Writer // live ASCII progress display; nil = disabled
+	client              *llm.Client
+	registry            *tools.Registry
+	model               string
+	roles               []Role
+	maxSteps            int
+	synthMode           SynthMode
+	cbs                 callback.Handler
+	displayW            io.Writer // live ASCII progress display; nil = disabled
+	iterativeRefinement bool      // run a critic pass + one refinement round after first pass
 }
 
 // PanelOption configures a Panel.
@@ -101,6 +102,13 @@ func WithPanelModel(m string) PanelOption { return func(p *Panel) { p.model = m 
 // WithPanelDisplay enables the live ASCII progress box, written to w.
 // Pass os.Stderr to avoid mixing with stdout result output.
 func WithPanelDisplay(w io.Writer) PanelOption { return func(p *Panel) { p.displayW = w } }
+
+// WithIterativeRefinement enables a second pass: after all roles complete, a
+// critic role reviews all first-pass answers and each role gets one revision
+// chance. Doubles latency; best used on complex analytical goals.
+func WithIterativeRefinement(enabled bool) PanelOption {
+	return func(p *Panel) { p.iterativeRefinement = enabled }
+}
 
 // NewClientsForRoles iterates roles and creates a new llm.Client for each role
 // that has a non-empty ServerURL but no Client set. Call this after ParseRoles
@@ -238,6 +246,11 @@ func (p *Panel) Run(ctx context.Context, goal string) (*PanelResult, error) {
 		disp.render(true) // final render with total duration
 	}
 
+	// Iterative refinement: run a critic pass, then let each role revise once.
+	if p.iterativeRefinement && len(results) > 1 {
+		results = p.runIterativeRefinement(ctx, goal, results)
+	}
+
 	synthesis := p.synthesize(ctx, goal, results)
 	p.cbs.OnFinalAnswer(synthesis)
 
@@ -247,6 +260,98 @@ func (p *Panel) Run(ctx context.Context, goal string) (*PanelResult, error) {
 		Synthesis: synthesis,
 		Duration:  time.Since(start),
 	}, nil
+}
+
+// runIterativeRefinement runs a critic pass over first-pass answers, then gives
+// each role one revision opportunity with the critique as added context.
+func (p *Panel) runIterativeRefinement(ctx context.Context, goal string, firstPass []RoleResult) []RoleResult {
+	// Build critique prompt from all first-pass answers.
+	var sb strings.Builder
+	sb.WriteString("You are a critical reviewer. The following answers were produced by specialist agents for the goal below. ")
+	sb.WriteString("Identify what is missing, unclear, or potentially incorrect across all answers. Be specific and constructive.\n\n")
+	fmt.Fprintf(&sb, "## Goal\n\n%s\n\n## First-Pass Answers\n\n", goal)
+	for _, r := range firstPass {
+		fmt.Fprintf(&sb, "### %s\n\n", r.Role)
+		if r.Err != nil || r.Answer == "" {
+			sb.WriteString("_(no answer produced)_\n\n")
+		} else {
+			fmt.Fprintf(&sb, "%s\n\n", r.Answer)
+		}
+	}
+	sb.WriteString("## Your Critique\n\nList specific improvements needed:")
+
+	critiqueRole, ok := BuiltinRole("critic")
+	if !ok {
+		return firstPass // no critic preset, skip refinement
+	}
+	critiqueSteps := p.maxSteps / 2
+	if critiqueSteps < 2 {
+		critiqueSteps = 2
+	}
+	critiqueRole.MaxSteps = critiqueSteps
+
+	critiqueReg := p.filteredRegistry(critiqueRole.ToolFilter)
+	critiqueExec := agent.NewExecutor(p.client, critiqueReg,
+		agent.WithStrategy(critiqueRole.Strategy),
+		agent.WithMemory(memory.NewBufferMemory()),
+		agent.WithMaxSteps(critiqueSteps),
+	)
+	critiqueEvents, critiquePath := critiqueExec.Run(ctx, sb.String())
+	for range critiqueEvents {
+	}
+	critique := strings.TrimSpace(critiquePath.Answer)
+	if critique == "" {
+		return firstPass // critic produced nothing useful
+	}
+
+	// Second pass: each role revises its answer in light of the critique.
+	refined := make([]RoleResult, len(p.roles))
+	var wg sync.WaitGroup
+	for i, role := range p.roles {
+		wg.Add(1)
+		go func(idx int, r Role) {
+			defer wg.Done()
+			refineGoal := fmt.Sprintf(
+				"%s\n\n## Your Previous Answer\n\n%s\n\n## Critic Feedback\n\n%s\n\nRevise your answer addressing the critique.",
+				goal, firstPass[idx].Answer, critique,
+			)
+			if r.SystemPrefix != "" {
+				refineGoal = r.SystemPrefix + "\n\n" + refineGoal
+			}
+			steps := r.MaxSteps
+			if steps <= 0 {
+				steps = p.maxSteps
+			}
+			roleClient := p.client
+			if r.Client != nil {
+				roleClient = r.Client
+			}
+			roleModel := r.Model
+			if roleModel == "" {
+				roleModel = p.model
+			}
+			opts := []agent.ExecutorOption{
+				agent.WithStrategy(r.Strategy),
+				agent.WithMemory(memory.NewBufferMemory()),
+				agent.WithMaxSteps(steps),
+			}
+			if roleModel != "" {
+				opts = append(opts, agent.WithModel(roleModel))
+			}
+			exec := agent.NewExecutor(roleClient, p.filteredRegistry(r.ToolFilter), opts...)
+			events, path := exec.Run(ctx, refineGoal)
+			for range events {
+			}
+			rr := firstPass[idx]
+			if answer := strings.TrimSpace(path.Answer); answer != "" {
+				rr.Answer = answer
+				rr.Steps += len(path.Steps)
+			}
+			refined[idx] = rr
+		}(i, role)
+	}
+	wg.Wait()
+	return refined
 }
 
 // filteredRegistry returns a sub-registry restricted to the named tools.

@@ -125,3 +125,101 @@ func (h *LogHandler) OnError(err error) {
 }
 
 func ts() string { return time.Now().Format("15:04:05.000") }
+
+// ─── AsyncMultiHandler ────────────────────────────────────────────────────────
+
+// AsyncMultiHandler fans events out to a list of handlers via a buffered
+// channel dispatched by a single background goroutine. A slow handler (e.g. a
+// file logger) does not block the agent loop. Call Close() after the run ends
+// to flush all queued events and stop the goroutine.
+//
+// If the internal buffer is full, new events are silently dropped — this only
+// affects observability, not agent correctness.
+type AsyncMultiHandler struct {
+	handlers []Handler
+	ch       chan func()
+	done     chan struct{}
+}
+
+// NewAsyncMultiHandler creates an AsyncMultiHandler with a channel buffer of
+// bufSize events. The background dispatch goroutine is started immediately.
+// bufSize of 256 is suitable for most runs.
+func NewAsyncMultiHandler(bufSize int, handlers ...Handler) *AsyncMultiHandler {
+	a := &AsyncMultiHandler{
+		handlers: handlers,
+		ch:       make(chan func(), bufSize),
+		done:     make(chan struct{}),
+	}
+	go func() {
+		defer close(a.done)
+		for fn := range a.ch {
+			fn()
+		}
+	}()
+	return a
+}
+
+// Close drains all pending events and stops the background goroutine.
+// Must be called exactly once after the agent run completes.
+func (a *AsyncMultiHandler) Close() {
+	close(a.ch)
+	<-a.done
+}
+
+func (a *AsyncMultiHandler) send(fn func()) {
+	select {
+	case a.ch <- fn:
+	default:
+		// Buffer full: drop event rather than blocking the agent.
+	}
+}
+
+func (a *AsyncMultiHandler) OnStart(goal string) {
+	a.send(func() {
+		for _, h := range a.handlers {
+			h.OnStart(goal)
+		}
+	})
+}
+func (a *AsyncMultiHandler) OnThought(step int, t ThoughtEvent) {
+	a.send(func() {
+		for _, h := range a.handlers {
+			h.OnThought(step, t)
+		}
+	})
+}
+func (a *AsyncMultiHandler) OnToolCall(step int, c ToolCallEvent) {
+	a.send(func() {
+		for _, h := range a.handlers {
+			h.OnToolCall(step, c)
+		}
+	})
+}
+func (a *AsyncMultiHandler) OnObservation(step int, obs string) {
+	a.send(func() {
+		for _, h := range a.handlers {
+			h.OnObservation(step, obs)
+		}
+	})
+}
+func (a *AsyncMultiHandler) OnToken(step int, token string) {
+	a.send(func() {
+		for _, h := range a.handlers {
+			h.OnToken(step, token)
+		}
+	})
+}
+func (a *AsyncMultiHandler) OnFinalAnswer(answer string) {
+	a.send(func() {
+		for _, h := range a.handlers {
+			h.OnFinalAnswer(answer)
+		}
+	})
+}
+func (a *AsyncMultiHandler) OnError(err error) {
+	a.send(func() {
+		for _, h := range a.handlers {
+			h.OnError(err)
+		}
+	})
+}

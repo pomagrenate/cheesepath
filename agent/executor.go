@@ -178,8 +178,20 @@ func (e *Executor) Run(ctx context.Context, goal string) (<-chan StreamEvent, *C
 			}
 		}
 
+		const maxStepRetries = 2
+		stepErrRetries := 0
+
 		for step := 0; step < e.maxSteps; step++ {
 			events <- StreamEvent{Type: EventThinking, Step: step, Payload: ""}
+
+			// Trigger memory compression every 20 steps. This is a no-op for
+			// BufferMemory/FileMemory; only SummaryMemory does real work, and it
+			// guards itself with an internal token budget check.
+			if step > 0 && step%20 == 0 {
+				if cerr := e.mem.Compress(ctx); cerr != nil {
+					e.cbs.OnError(fmt.Errorf("memory compress (non-fatal): %w", cerr))
+				}
+			}
 
 			req := llm.Request{
 				Model:         e.model,
@@ -192,6 +204,7 @@ func (e *Executor) Run(ctx context.Context, goal string) (<-chan StreamEvent, *C
 			tokenCh, fullCh, errCh := e.client.CompleteStream(ctx, req)
 
 			var raw string
+			retryStep := false
 		drain:
 			for {
 				select {
@@ -209,10 +222,19 @@ func (e *Executor) Run(ctx context.Context, goal string) (<-chan StreamEvent, *C
 					fullCh = nil
 				case err, ok := <-errCh:
 					if ok && err != nil {
-						events <- StreamEvent{Type: EventError, Step: step, Payload: err.Error()}
-						e.cbs.OnError(err)
-						path.Status = PathFailed
-						return
+						if stepErrRetries < maxStepRetries {
+							stepErrRetries++
+							events <- StreamEvent{Type: EventError, Step: step,
+								Payload: fmt.Sprintf("stream error (retry %d/%d): %v", stepErrRetries, maxStepRetries, err)}
+							e.cbs.OnError(fmt.Errorf("stream error retry %d: %w", stepErrRetries, err))
+							retryStep = true
+						} else {
+							stepErrRetries = 0
+							events <- StreamEvent{Type: EventError, Step: step, Payload: err.Error()}
+							e.cbs.OnError(err)
+							path.Status = PathFailed
+							return
+						}
 					}
 					errCh = nil
 				case <-ctx.Done():
@@ -231,6 +253,13 @@ func (e *Executor) Run(ctx context.Context, goal string) (<-chan StreamEvent, *C
 					break drain
 				}
 			}
+			// If a transient stream error fired, re-run the same step index.
+			if retryStep {
+				step--
+				continue
+			}
+			// Successful stream: reset the per-step retry counter.
+			stepErrRetries = 0
 
 			if raw == "" {
 				noProgressTurns++
@@ -574,6 +603,14 @@ func (e *Executor) Run(ctx context.Context, goal string) (<-chan StreamEvent, *C
 						events <- StreamEvent{Type: EventCrabTableReq, Step: step, Payload: call}
 					}
 					mu.Unlock()
+
+					if valErr := tools.ValidateArgs(tool.Schema(), call.Args); valErr != nil {
+						mu.Lock()
+						crabStep.ToolCalls[idx].Error = "schema validation: " + valErr.Error()
+						observations = append(observations, fmt.Sprintf("[%s]: ERROR — invalid args: %v", call.ToolName, valErr))
+						mu.Unlock()
+						return
+					}
 
 					result, execErr := tool.Execute(ctx, call.Args)
 

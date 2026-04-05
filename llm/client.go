@@ -1,6 +1,6 @@
 // Package llm provides an HTTP client to call the cheese-server OpenAI-compatible
 // local inference endpoint. Supports streaming (SSE), GBNF grammar-constrained
-// decoding, and automatic model discovery.
+// decoding, automatic model discovery, and configurable retry with exponential backoff.
 package llm
 
 import (
@@ -15,18 +15,46 @@ import (
 	"time"
 )
 
+// ClientOption configures a Client.
+type ClientOption func(*Client)
+
+// WithMaxRetries sets how many additional attempts to make after the first
+// failure (default 3). Set to 0 to disable retries.
+func WithMaxRetries(n int) ClientOption { return func(c *Client) { c.maxRetries = n } }
+
+// WithRetryBaseDelay sets the initial backoff delay between retry attempts
+// (default 1s). Each subsequent attempt doubles the delay.
+func WithRetryBaseDelay(d time.Duration) ClientOption { return func(c *Client) { c.retryDelay = d } }
+
+// WithStreamTimeout sets a per-request timeout on the HTTP client used for
+// streaming requests (default 0 = no timeout). The timeout applies to the
+// whole stream duration, not just the initial connection.
+func WithStreamTimeout(d time.Duration) ClientOption {
+	return func(c *Client) { c.streamTimeout = d }
+}
+
 // Client calls cheese-server's OpenAI-compatible /v1/chat/completions endpoint.
 type Client struct {
-	baseURL    string
-	httpClient *http.Client
+	baseURL       string
+	httpClient    *http.Client
+	maxRetries    int
+	retryDelay    time.Duration
+	streamTimeout time.Duration
 }
 
 // NewClient creates a new LLM client pointing at the given base URL.
-func NewClient(baseURL string) *Client {
-	return &Client{
+// Defaults: maxRetries=3, retryDelay=1s, no stream timeout.
+func NewClient(baseURL string, opts ...ClientOption) *Client {
+	c := &Client{
 		baseURL:    baseURL,
 		httpClient: &http.Client{Timeout: 0},
+		maxRetries: 3,
+		retryDelay: time.Second,
 	}
+	for _, o := range opts {
+		o(c)
+	}
+	return c
 }
 
 // BaseURL returns the base URL this client targets.
@@ -133,6 +161,52 @@ func (c *Client) resolveModel(ctx context.Context, model string) (string, error)
 	return "", fmt.Errorf("crabchain/llm: no model loaded — load a model in AI Space first")
 }
 
+// ─── Retry helper ─────────────────────────────────────────────────────────────
+
+// doWithRetry executes an HTTP POST to endpoint with body, retrying on transient
+// errors (connection failures, 429, 5xx) up to c.maxRetries additional attempts
+// with exponential backoff starting at c.retryDelay.
+func (c *Client) doWithRetry(ctx context.Context, hc *http.Client, endpoint string, body []byte, accept string) (*http.Response, error) {
+	var lastErr error
+	delay := c.retryDelay
+
+	for attempt := 0; attempt <= c.maxRetries; attempt++ {
+		if attempt > 0 {
+			select {
+			case <-time.After(delay):
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			}
+			delay *= 2
+		}
+
+		httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost,
+			c.baseURL+endpoint, bytes.NewReader(body))
+		if err != nil {
+			return nil, fmt.Errorf("crabchain/llm: build request: %w", err)
+		}
+		httpReq.Header.Set("Content-Type", "application/json")
+		if accept != "" {
+			httpReq.Header.Set("Accept", accept)
+		}
+
+		resp, err := hc.Do(httpReq)
+		if err != nil {
+			lastErr = fmt.Errorf("crabchain/llm: http (attempt %d): %w", attempt+1, err)
+			continue
+		}
+		// Retry on server overload or transient server errors.
+		if resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode >= 500 {
+			raw, _ := io.ReadAll(resp.Body)
+			resp.Body.Close()
+			lastErr = fmt.Errorf("crabchain/llm: server %d (attempt %d): %s", resp.StatusCode, attempt+1, string(raw))
+			continue
+		}
+		return resp, nil
+	}
+	return nil, fmt.Errorf("crabchain/llm: all %d attempt(s) failed: %w", c.maxRetries+1, lastErr)
+}
+
 // ─── Streaming completion ─────────────────────────────────────────────────────
 
 // CompleteStream returns three channels: token strings, full accumulated text, and errors.
@@ -160,18 +234,16 @@ func (c *Client) CompleteStream(ctx context.Context, req Request) (<-chan string
 			eCh <- fmt.Errorf("crabchain/llm: marshal: %w", err)
 			return
 		}
-		httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost,
-			c.baseURL+"/v1/chat/completions", bytes.NewReader(body))
-		if err != nil {
-			eCh <- fmt.Errorf("crabchain/llm: build request: %w", err)
-			return
-		}
-		httpReq.Header.Set("Content-Type", "application/json")
-		httpReq.Header.Set("Accept", "text/event-stream")
 
-		resp, err := c.httpClient.Do(httpReq)
+		// Use a separate http.Client with the stream timeout if configured.
+		hc := c.httpClient
+		if c.streamTimeout > 0 {
+			hc = &http.Client{Timeout: c.streamTimeout}
+		}
+
+		resp, err := c.doWithRetry(ctx, hc, "/v1/chat/completions", body, "text/event-stream")
 		if err != nil {
-			eCh <- fmt.Errorf("crabchain/llm: http: %w", err)
+			eCh <- err
 			return
 		}
 		defer resp.Body.Close()
@@ -218,7 +290,7 @@ func (c *Client) CompleteStream(ctx context.Context, req Request) (<-chan string
 	return tCh, fCh, eCh
 }
 
-// Complete sends a non-streaming chat completion.
+// Complete sends a non-streaming chat completion with retry.
 func (c *Client) Complete(ctx context.Context, req Request) (string, error) {
 	model, err := c.resolveModel(ctx, req.Model)
 	if err != nil {
@@ -231,16 +303,10 @@ func (c *Client) Complete(ctx context.Context, req Request) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("crabchain/llm: marshal: %w", err)
 	}
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost,
-		c.baseURL+"/v1/chat/completions", bytes.NewReader(body))
-	if err != nil {
-		return "", fmt.Errorf("crabchain/llm: build request: %w", err)
-	}
-	httpReq.Header.Set("Content-Type", "application/json")
 
-	resp, err := c.httpClient.Do(httpReq)
+	resp, err := c.doWithRetry(ctx, c.httpClient, "/v1/chat/completions", body, "")
 	if err != nil {
-		return "", fmt.Errorf("crabchain/llm: http: %w", err)
+		return "", err
 	}
 	defer resp.Body.Close()
 
