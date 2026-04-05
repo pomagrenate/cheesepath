@@ -6,6 +6,7 @@ package panel
 import (
 	"context"
 	"fmt"
+	"io"
 	"strings"
 	"sync"
 	"time"
@@ -42,11 +43,20 @@ type Role struct {
 	MaxSteps int
 	// ToolFilter limits which tools this role can call. Empty = all tools.
 	ToolFilter []string
+	// Model overrides the LLM model for this role. Empty inherits from Panel.
+	Model string
+	// ServerURL points this role at a specific LLM server endpoint, enabling
+	// true multi-model panels (different server per role). Empty = use Panel's client.
+	ServerURL string
+	// Client is a pre-built LLM client for this role. Set automatically when
+	// ServerURL is non-empty via NewClientsForRoles. Nil = use Panel's client.
+	Client *llm.Client
 }
 
 // RoleResult captures one role's execution output.
 type RoleResult struct {
 	Role     string
+	Model    string
 	Answer   string
 	Steps    int
 	Duration time.Duration
@@ -70,6 +80,7 @@ type Panel struct {
 	maxSteps  int
 	synthMode SynthMode
 	cbs       callback.Handler
+	displayW  io.Writer // live ASCII progress display; nil = disabled
 }
 
 // PanelOption configures a Panel.
@@ -86,6 +97,24 @@ func WithPanelMaxSteps(n int) PanelOption { return func(p *Panel) { p.maxSteps =
 
 // WithPanelModel overrides the LLM model for all roles (default: inherits from client).
 func WithPanelModel(m string) PanelOption { return func(p *Panel) { p.model = m } }
+
+// WithPanelDisplay enables the live ASCII progress box, written to w.
+// Pass os.Stderr to avoid mixing with stdout result output.
+func WithPanelDisplay(w io.Writer) PanelOption { return func(p *Panel) { p.displayW = w } }
+
+// NewClientsForRoles iterates roles and creates a new llm.Client for each role
+// that has a non-empty ServerURL but no Client set. Call this after ParseRoles
+// and before NewPanel when using per-role server URLs.
+func NewClientsForRoles(roles []Role) []Role {
+	out := make([]Role, len(roles))
+	copy(out, roles)
+	for i := range out {
+		if out[i].ServerURL != "" && out[i].Client == nil {
+			out[i].Client = llm.NewClient(out[i].ServerURL)
+		}
+	}
+	return out
+}
 
 // NewPanel creates a Panel with sane defaults.
 func NewPanel(client *llm.Client, registry *tools.Registry, roles []Role, opts ...PanelOption) *Panel {
@@ -112,6 +141,27 @@ func (p *Panel) Run(ctx context.Context, goal string) (*PanelResult, error) {
 
 	p.cbs.OnStart(fmt.Sprintf("[panel] goal=%q roles=%d", goal, len(p.roles)))
 
+	// Start the live ASCII display if a writer was provided.
+	var disp *panelDisplay
+	var dispDone chan struct{}
+	if p.displayW != nil {
+		disp = newPanelDisplay(p.displayW, p.roles, p.model)
+		dispDone = make(chan struct{})
+		disp.render(false)
+		go func() {
+			ticker := time.NewTicker(200 * time.Millisecond)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-ticker.C:
+					disp.render(false)
+				case <-dispDone:
+					return
+				}
+			}
+		}()
+	}
+
 	for i, role := range p.roles {
 		wg.Add(1)
 		go func(idx int, r Role) {
@@ -123,20 +173,36 @@ func (p *Panel) Run(ctx context.Context, goal string) (*PanelResult, error) {
 				steps = p.maxSteps
 			}
 
+			// Role-level client: use role's dedicated client, else panel client.
+			roleClient := p.client
+			if r.Client != nil {
+				roleClient = r.Client
+			}
+
+			// Role-level model: use role override, fall back to panel model.
+			roleModel := r.Model
+			if roleModel == "" {
+				roleModel = p.model
+			}
+
 			opts := []agent.ExecutorOption{
 				agent.WithStrategy(r.Strategy),
 				agent.WithMemory(memory.NewBufferMemory()),
 				agent.WithMaxSteps(steps),
 			}
-			if p.model != "" {
-				opts = append(opts, agent.WithModel(p.model))
+			if roleModel != "" {
+				opts = append(opts, agent.WithModel(roleModel))
 			}
 
-			exec := agent.NewExecutor(p.client, reg, opts...)
+			exec := agent.NewExecutor(roleClient, reg, opts...)
 
 			roleGoal := goal
 			if r.SystemPrefix != "" {
 				roleGoal = r.SystemPrefix + "\n\n" + goal
+			}
+
+			if disp != nil {
+				disp.markRunning(idx)
 			}
 
 			t0 := time.Now()
@@ -144,13 +210,21 @@ func (p *Panel) Run(ctx context.Context, goal string) (*PanelResult, error) {
 			for range events {
 			} // drain required to avoid goroutine leak
 
+			dur := time.Since(t0)
+			failed := path.Status == agent.PathFailed || path.Status == agent.PathAborted
+
+			if disp != nil {
+				disp.markDone(idx, len(path.Steps), dur, failed)
+			}
+
 			rr := RoleResult{
 				Role:     r.Name,
+				Model:    roleModel,
 				Answer:   strings.TrimSpace(path.Answer),
 				Steps:    len(path.Steps),
-				Duration: time.Since(t0),
+				Duration: dur,
 			}
-			if path.Status == agent.PathFailed || path.Status == agent.PathAborted {
+			if failed {
 				rr.Err = fmt.Errorf("role %q: status=%s", r.Name, path.Status)
 			}
 			results[idx] = rr
@@ -158,6 +232,11 @@ func (p *Panel) Run(ctx context.Context, goal string) (*PanelResult, error) {
 	}
 
 	wg.Wait()
+
+	if disp != nil {
+		close(dispDone)
+		disp.render(true) // final render with total duration
+	}
 
 	synthesis := p.synthesize(ctx, goal, results)
 	p.cbs.OnFinalAnswer(synthesis)
@@ -258,8 +337,12 @@ func (r *PanelResult) Format() string {
 		if rr.Err != nil {
 			status = "failed"
 		}
-		fmt.Fprintf(&sb, "  %-16s steps=%-3d dur=%-12s status=%s\n",
-			rr.Role, rr.Steps, rr.Duration.Round(time.Millisecond), status)
+		model := rr.Model
+		if model == "" {
+			model = "default"
+		}
+		fmt.Fprintf(&sb, "  %-16s %-20s steps=%-3d dur=%-12s status=%s\n",
+			rr.Role, model, rr.Steps, rr.Duration.Round(time.Millisecond), status)
 	}
 	sb.WriteString("\n")
 	sb.WriteString(r.Synthesis)

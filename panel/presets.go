@@ -97,27 +97,61 @@ func BuiltinRole(name string) (Role, bool) {
 	return Role{}, false
 }
 
-// ParseRoles converts a comma-separated string of role names into a []Role slice.
-// Unknown names fall back to a generic ReAct role with that name.
+// ParseRoles converts a comma-separated string of role specs into a []Role slice.
+//
+// Each spec supports three formats:
+//
+//	"researcher"                         — builtin role, panel-default model & server
+//	"researcher:qwen2.5"                 — builtin role, specific model name
+//	"researcher:qwen2.5@http://host:port" — builtin role, specific model on specific server
+//	"researcher@http://host:port"        — builtin role, panel-default model on specific server
+//
+// Model names may contain colons (e.g. "llama3:8b") — the split happens on the
+// last "@" for the URL and the first ":" before any "@" for the model name.
+// Unknown role names fall back to a generic ReAct role with that name.
 func ParseRoles(roleNames string) []Role {
 	var roles []Role
-	for _, name := range strings.Split(roleNames, ",") {
-		name = strings.TrimSpace(name)
-		if name == "" {
+	for _, spec := range strings.Split(roleNames, ",") {
+		spec = strings.TrimSpace(spec)
+		if spec == "" {
 			continue
 		}
-		if r, ok := BuiltinRole(name); ok {
-			roles = append(roles, r)
-		} else {
-			// Generic fallback: ReAct with the given name, no tool filter.
-			roles = append(roles, Role{
-				Name:     strings.Title(name),
-				Strategy: agent.NewReActStrategy(),
-			})
+
+		// Extract optional @url suffix first (last "@" wins).
+		serverURL := ""
+		if atIdx := strings.LastIndex(spec, "@"); atIdx >= 0 {
+			candidate := strings.TrimSpace(spec[atIdx+1:])
+			if strings.HasPrefix(candidate, "http://") || strings.HasPrefix(candidate, "https://") {
+				serverURL = candidate
+				spec = strings.TrimSpace(spec[:atIdx])
+			}
 		}
+
+		// Split remaining "name:model" on first colon.
+		name, model := spec, ""
+		if colonIdx := strings.IndexByte(spec, ':'); colonIdx >= 0 {
+			name = strings.TrimSpace(spec[:colonIdx])
+			model = strings.TrimSpace(spec[colonIdx+1:])
+		}
+
+		var role Role
+		if r, ok := BuiltinRole(name); ok {
+			role = r
+		} else {
+			titled := name
+			if len(name) > 0 {
+				titled = strings.ToUpper(name[:1]) + name[1:]
+			}
+			role = Role{
+				Name:     titled,
+				Strategy: agent.NewReActStrategy(),
+			}
+		}
+		role.Model = model
+		role.ServerURL = serverURL
+		roles = append(roles, role)
 	}
 	if len(roles) == 0 {
-		// Default panel if nothing specified.
 		r1, _ := BuiltinRole("researcher")
 		r2, _ := BuiltinRole("critic")
 		r3, _ := BuiltinRole("planner")
