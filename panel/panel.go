@@ -28,6 +28,10 @@ const (
 	SynthLLM SynthMode = "llm"
 	// SynthFirst returns the first role's non-empty, non-error answer.
 	SynthFirst SynthMode = "first"
+	// SynthVote asks the LLM to pick the single best answer from the panel and
+	// returns it verbatim. Avoids hallucination risk of free-form synthesis;
+	// best for factual questions where one role is likely correct.
+	SynthVote SynthMode = "vote"
 )
 
 // Role defines one participant in the panel.
@@ -383,6 +387,9 @@ func (p *Panel) synthesize(ctx context.Context, goal string, results []RoleResul
 	case SynthLLM:
 		return p.synthLLM(ctx, goal, results)
 
+	case SynthVote:
+		return p.synthVote(ctx, goal, results)
+
 	default: // SynthConcat
 		return p.synthConcat(results)
 	}
@@ -431,6 +438,63 @@ func (p *Panel) synthLLM(ctx context.Context, goal string, results []RoleResult)
 		return p.synthConcat(results)
 	}
 	return strings.TrimSpace(resp)
+}
+
+// synthVote asks the LLM to pick the single best role answer and returns it
+// verbatim. This avoids free-form synthesis hallucination; the LLM selects,
+// not rewrites. Falls back to synthConcat if the LLM call fails or if no
+// usable answers exist.
+func (p *Panel) synthVote(ctx context.Context, goal string, results []RoleResult) string {
+	// Collect usable answers.
+	type candidate struct {
+		role   string
+		answer string
+	}
+	var candidates []candidate
+	for _, r := range results {
+		if r.Err == nil && strings.TrimSpace(r.Answer) != "" {
+			candidates = append(candidates, candidate{r.Role, r.Answer})
+		}
+	}
+	if len(candidates) == 0 {
+		return p.synthConcat(results)
+	}
+	if len(candidates) == 1 {
+		return candidates[0].answer
+	}
+
+	var sb strings.Builder
+	sb.WriteString("You are a neutral evaluator. Below are answers from specialist agents for the same goal.\n")
+	sb.WriteString("Pick the single BEST answer — the one that is most accurate, complete, and directly addresses the goal.\n")
+	sb.WriteString("Reply with ONLY: the label of the best answer (e.g. \"[A]\"), a newline, and then the full text of that answer verbatim.\n\n")
+	fmt.Fprintf(&sb, "Goal: %s\n\n", goal)
+	labels := "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+	for i, c := range candidates {
+		label := string(labels[i%len(labels)])
+		fmt.Fprintf(&sb, "[%s] %s:\n%s\n\n", label, c.role, c.answer)
+	}
+
+	resp, err := p.client.Complete(ctx, llm.Request{
+		Messages: []llm.Message{{Role: "user", Content: sb.String()}},
+		Model:    p.model,
+	})
+	if err != nil {
+		return p.synthConcat(results)
+	}
+	resp = strings.TrimSpace(resp)
+	// The model should echo the chosen answer after the label line.
+	// Find the first newline and return everything after it as the answer.
+	if idx := strings.Index(resp, "\n"); idx >= 0 {
+		chosen := strings.TrimSpace(resp[idx+1:])
+		if chosen != "" {
+			return chosen
+		}
+	}
+	// Fallback: return the full response if parsing fails.
+	if resp != "" {
+		return resp
+	}
+	return p.synthConcat(results)
 }
 
 // Format renders a PanelResult as a human-readable string for CLI output.

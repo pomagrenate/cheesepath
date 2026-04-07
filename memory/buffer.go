@@ -11,16 +11,28 @@ import (
 )
 
 // BufferMemory is an in-memory conversation buffer.
+// When maxSize > 0, Add evicts the oldest message (FIFO) before appending once
+// the cap is reached, keeping memory bounded.
 type BufferMemory struct {
-	mu   sync.RWMutex
-	msgs []llm.Message
+	mu      sync.RWMutex
+	msgs    []llm.Message
+	maxSize int // 0 = unlimited
 }
 
 func NewBufferMemory() *BufferMemory { return &BufferMemory{} }
 
+// NewBoundedBufferMemory creates a BufferMemory that retains at most maxSize
+// messages, evicting the oldest when full.
+func NewBoundedBufferMemory(maxSize int) *BufferMemory {
+	return &BufferMemory{maxSize: maxSize}
+}
+
 func (b *BufferMemory) Add(msg llm.Message) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	if b.maxSize > 0 && len(b.msgs) >= b.maxSize {
+		b.msgs = b.msgs[1:] // evict oldest
+	}
 	b.msgs = append(b.msgs, msg)
 	return nil
 }

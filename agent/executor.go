@@ -28,6 +28,8 @@ type Executor struct {
 	approver        Approver
 	checkpointPath  string
 	checkpointEvery int
+	maxHistoryMsgs  int // sliding window on in-run history; 0 = unlimited
+	maxObsBytes     int // per-observation truncation cap in bytes; 0 = unlimited
 }
 
 // ExecutorOption configures an Executor.
@@ -39,6 +41,15 @@ func WithCallbacks(h callback.Handler) ExecutorOption { return func(e *Executor)
 func WithModel(model string) ExecutorOption           { return func(e *Executor) { e.model = model } }
 func WithMaxSteps(n int) ExecutorOption               { return func(e *Executor) { e.maxSteps = n } }
 func WithApprover(a Approver) ExecutorOption          { return func(e *Executor) { e.approver = a } }
+
+// WithMaxHistory sets a sliding-window cap on the in-run LLM history.
+// history[0] (the system prompt) is always preserved; oldest non-system messages
+// are evicted when the window is exceeded. Default 0 = unlimited.
+func WithMaxHistory(n int) ExecutorOption { return func(e *Executor) { e.maxHistoryMsgs = n } }
+
+// WithMaxObservationBytes caps each tool observation before it is appended to
+// history. Observations over the limit are truncated with a notice. Default 0 = unlimited.
+func WithMaxObservationBytes(n int) ExecutorOption { return func(e *Executor) { e.maxObsBytes = n } }
 
 // NewExecutor creates an Executor with defaults: ReAct strategy, BufferMemory, 20 steps.
 func NewExecutor(client *llm.Client, registry *tools.Registry, opts ...ExecutorOption) *Executor {
@@ -678,6 +689,14 @@ func (e *Executor) Run(ctx context.Context, goal string) (<-chan StreamEvent, *C
 			}
 			wg.Wait()
 
+			// Truncate oversized observations before storing in history.
+			if e.maxObsBytes > 0 {
+				for i, o := range observations {
+					if len(o) > e.maxObsBytes {
+						observations[i] = o[:e.maxObsBytes] + "\n…[truncated]"
+					}
+				}
+			}
 			obs := strings.Join(observations, "\n")
 			crabStep.Observation = obs
 			path.Steps = append(path.Steps, crabStep)
@@ -701,6 +720,11 @@ func (e *Executor) Run(ctx context.Context, goal string) (<-chan StreamEvent, *C
 				llm.Message{Role: "assistant", Content: raw},
 				llm.Message{Role: "user", Content: "Observation:\n" + obs + "\n\nContinue reasoning toward the goal."},
 			)
+			// Sliding-window eviction: always keep history[0] (system prompt).
+			if e.maxHistoryMsgs > 0 && len(history) > e.maxHistoryMsgs {
+				excess := len(history) - e.maxHistoryMsgs
+				history = append(history[:1], history[1+excess:]...)
+			}
 			_ = e.mem.Add(llm.Message{Role: "assistant", Content: raw})
 			if e.checkpointPath != "" && e.checkpointEvery > 0 && (step+1)%e.checkpointEvery == 0 {
 				_ = SaveCheckpoint(e.checkpointPath, path.ID, goal, e.strategy.Name(), step+1, e.mem.Messages())

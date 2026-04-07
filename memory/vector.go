@@ -19,11 +19,14 @@ type VectorEntry struct {
 // VectorMemory stores messages with semantic embeddings and retrieves
 // the most contextually relevant past turns using cosine similarity.
 // It implements both Memory and SemanticMemory.
+// When maxEntries > 0, Add evicts the oldest entry (FIFO) once the cap is hit,
+// keeping both the message and embedding RAM bounded.
 type VectorMemory struct {
-	mu        sync.RWMutex
-	embed     EmbedFunc
-	entries   []VectorEntry
-	maxTokens int // approximate token budget for Retrieve results
+	mu         sync.RWMutex
+	embed      EmbedFunc
+	entries    []VectorEntry
+	maxTokens  int // approximate token budget for Retrieve results
+	maxEntries int // 0 = unlimited
 }
 
 // NewVectorMemory creates a VectorMemory backed by the provided embedding function.
@@ -32,12 +35,21 @@ func NewVectorMemory(embedFn EmbedFunc, maxTokens int) *VectorMemory {
 	return &VectorMemory{embed: embedFn, maxTokens: maxTokens}
 }
 
+// NewBoundedVectorMemory creates a VectorMemory with an entry cap. When
+// maxEntries > 0, the oldest entry is evicted before each new Add once full.
+func NewBoundedVectorMemory(embedFn EmbedFunc, maxTokens, maxEntries int) *VectorMemory {
+	return &VectorMemory{embed: embedFn, maxTokens: maxTokens, maxEntries: maxEntries}
+}
+
 // Add appends msg to the store and attempts to compute its embedding.
 // If embedding fails the message is stored without one (graceful degradation).
 func (v *VectorMemory) Add(msg llm.Message) error {
 	emb, _ := v.embed(msg.Content) // ignore error; nil embedding is handled in Retrieve
 	v.mu.Lock()
 	defer v.mu.Unlock()
+	if v.maxEntries > 0 && len(v.entries) >= v.maxEntries {
+		v.entries = v.entries[1:] // evict oldest
+	}
 	v.entries = append(v.entries, VectorEntry{
 		Msg:       msg,
 		Embedding: emb,
