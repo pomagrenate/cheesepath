@@ -167,5 +167,7 @@ func DefaultRegistry(cheesecrabAddr string) *Registry {
 	r.Register(NewGrepInFilesTool())
 	r.Register(NewJSONQueryTool())
 	r.Register(NewWebFetchTool())
+	// Phase 8: Clinical Breakthrough Tools
+	r.Register(NewVitalsMonitorTool(cheesecrabAddr)) 
 	return r
 }
