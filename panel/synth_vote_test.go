@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/AutoCookies/crabpath/callback"
+	"github.com/AutoCookies/cheesepath/callback"
 )
 
 // Ensure import used.

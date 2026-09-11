@@ -1,3 +1,3 @@
-module github.com/AutoCookies/crabpath
+module github.com/AutoCookies/cheesepath
 
 go 1.23

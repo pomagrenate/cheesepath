@@ -6,7 +6,7 @@ import (
 	"os"
 	"time"
 
-	"github.com/AutoCookies/crabpath/llm"
+	"github.com/AutoCookies/cheesepath/llm"
 )
 
 // Checkpoint captures enough agent state to resume a run after a crash or

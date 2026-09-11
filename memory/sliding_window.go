@@ -4,7 +4,7 @@ import (
 	"context"
 	"sync"
 
-	"github.com/AutoCookies/crabpath/llm"
+	"github.com/AutoCookies/cheesepath/llm"
 )
 
 // SlidingWindowMemory retains only the most recent windowSize messages.

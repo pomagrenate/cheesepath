@@ -4,7 +4,7 @@ package memory
 import (
 	"context"
 
-	"github.com/AutoCookies/crabpath/llm"
+	"github.com/AutoCookies/cheesepath/llm"
 )
 
 // Memory stores and retrieves conversation history.

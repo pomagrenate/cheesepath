@@ -4,7 +4,7 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/AutoCookies/crabpath/llm"
+	"github.com/AutoCookies/cheesepath/llm"
 )
 
 // SummaryMemory wraps a base Memory and compresses it via an LLM when the

@@ -5,8 +5,8 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/AutoCookies/crabpath/llm"
-	"github.com/AutoCookies/crabpath/prompt"
+	"github.com/AutoCookies/cheesepath/llm"
+	"github.com/AutoCookies/cheesepath/prompt"
 )
 
 // ChainInput is the input to an LLMChain: a variable map plus optional history.

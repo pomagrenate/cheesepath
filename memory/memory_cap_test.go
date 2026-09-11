@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/AutoCookies/crabpath/llm"
+	"github.com/AutoCookies/cheesepath/llm"
 )
 
 // ─── helpers ──────────────────────────────────────────────────────────────────

@@ -6,7 +6,7 @@ import (
 	"sort"
 	"sync"
 
-	"github.com/AutoCookies/crabpath/llm"
+	"github.com/AutoCookies/cheesepath/llm"
 )
 
 // VectorEntry stores a message alongside its embedding.

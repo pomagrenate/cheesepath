@@ -1,0 +1,40 @@
+{
+  "scenario_a": {
+    "name": "Scenario A: 50-Node Deep Pipeline",
+    "iterations": 300,
+    "p50_us": 29923.80000068806,
+    "p90_us": 40209.80000495911,
+    "p99_us": 118600.29999661492,
+    "mean_us": 33324.494666376275,
+    "step_transition_us": 666.4898933275255,
+    "throughput": 30.006144358179686
+  },
+  "scenario_b": {
+    "name": "Scenario B: Cyclic ReAct Loop (20 Turns)",
+    "iterations": 200,
+    "p50_ms": 24.71000000514323,
+    "p90_ms": 30.977100002928637,
+    "p99_ms": 113.203999993857,
+    "mean_ms": 27.231104999991658,
+    "throughput": 36.72027974389666
+  },
+  "scenario_c": {
+    "name": "Scenario C: Concurrency (500 Workflows)",
+    "concurrency": 500,
+    "total_time_s": 2.435880199998792,
+    "p50_ms": 2018.6312000005273,
+    "p90_ms": 2231.30890000175,
+    "p99_ms": 2329.285500003607,
+    "mean_ms": 2005.6110639998358,
+    "throughput": 205.26461030400756
+  },
+  "scenario_d": {
+    "name": "Scenario D: Nested Subgraphs & Dynamic Routing",
+    "iterations": 200,
+    "p50_ms": 5.38819999928819,
+    "p90_ms": 8.962499996414408,
+    "p99_ms": 14.935500003048219,
+    "mean_ms": 5.900768999563297,
+    "throughput": 169.3987150264435
+  }
+}

@@ -7,7 +7,7 @@ import (
 	"os"
 	"sync"
 
-	"github.com/AutoCookies/crabpath/llm"
+	"github.com/AutoCookies/cheesepath/llm"
 )
 
 // BufferMemory is an in-memory conversation buffer.

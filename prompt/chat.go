@@ -3,7 +3,7 @@ package prompt
 import (
 	"fmt"
 
-	"github.com/AutoCookies/crabpath/llm"
+	"github.com/AutoCookies/cheesepath/llm"
 )
 
 // MessageTemplate is one turn of a ChatTemplate: a role + a PromptTemplate.

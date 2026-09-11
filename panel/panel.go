@@ -11,11 +11,11 @@ import (
 	"sync"
 	"time"
 
-	"github.com/AutoCookies/crabpath/agent"
-	"github.com/AutoCookies/crabpath/callback"
-	"github.com/AutoCookies/crabpath/llm"
-	"github.com/AutoCookies/crabpath/memory"
-	"github.com/AutoCookies/crabpath/tools"
+	"github.com/AutoCookies/cheesepath/agent"
+	"github.com/AutoCookies/cheesepath/callback"
+	"github.com/AutoCookies/cheesepath/llm"
+	"github.com/AutoCookies/cheesepath/memory"
+	"github.com/AutoCookies/cheesepath/tools"
 )
 
 // SynthMode controls how role answers are merged into one final answer.

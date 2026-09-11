@@ -4,7 +4,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/AutoCookies/crabpath/llm"
+	"github.com/AutoCookies/cheesepath/llm"
 )
 
 // StepMetric captures per-tool-call performance data for one agent step.

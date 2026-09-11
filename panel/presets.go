@@ -3,7 +3,7 @@ package panel
 import (
 	"strings"
 
-	"github.com/AutoCookies/crabpath/agent"
+	"github.com/AutoCookies/cheesepath/agent"
 )
 
 // BuiltinRole returns a predefined Role configuration by name.
